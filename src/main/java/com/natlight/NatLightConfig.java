@@ -138,6 +138,33 @@ public interface NatLightConfig extends Config
 		return 40;
 	}
 
+	@ConfigItem(
+		keyName = "lightSources",
+		name = "Light sources",
+		description = "Make torches, fires, lamps and your fire spells light up their surroundings.",
+		position = -3,
+		section = lightingSection
+	)
+	default boolean lightSources()
+	{
+		return true;
+	}
+
+	@Range(
+		max = 200
+	)
+	@ConfigItem(
+		keyName = "lightSourceBrightness",
+		name = "Light source brightness (%)",
+		description = "How bright torches, fires and other light sources are.",
+		position = -2,
+		section = lightingSection
+	)
+	default int lightSourceBrightness()
+	{
+		return 100;
+	}
+
 	@Range(
 		max = MAX_DISTANCE
 	)

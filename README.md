@@ -11,6 +11,8 @@ Nat Light is a fork of RuneLite's stock GPU plugin (from `runelite-parent-1.13.2
 - **Static time (hour):** the hour to hold when the time is static. Sunrise is 6, sunset is 18.
 - **Sun strength:** how strongly the sun and moon shade the scene. 0 keeps the stock shading.
 - **Night brightness:** how bright the scene stays at night.
+- **Light sources:** torches, fires, lamps, candles, furnaces, lava and your own fire spells light up their surroundings. They're strongest at night and underground.
+- **Light source brightness:** how bright those light sources are.
 
 Underground areas and dungeons are not affected by the time of day.
 

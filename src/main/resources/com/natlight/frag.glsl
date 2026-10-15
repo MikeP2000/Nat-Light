@@ -39,6 +39,11 @@ uniform vec3 lightColor;
 uniform vec3 ambientColor;
 uniform int useLighting;
 
+#define MAX_POINT_LIGHTS 32
+uniform int pointLightCount;
+uniform vec4 pointLightPos[MAX_POINT_LIGHTS];    // xyz position, w radius
+uniform vec4 pointLightColor[MAX_POINT_LIGHTS];  // rgb color times brightness
+
 layout(std140) uniform uniforms {
   float cameraYaw;
   float cameraPitch;
@@ -75,7 +80,23 @@ vec3 applyLighting(vec3 color) {
     normal = -normal;
   }
   float diffuse = max(dot(normal, lightDirection), 0.0);
-  return color * (ambientColor + lightColor * diffuse);
+  vec3 light = ambientColor + lightColor * diffuse;
+
+  for (int i = 0; i < pointLightCount; i++) {
+    vec3 toLight = pointLightPos[i].xyz - fWorldPos;
+    float dist = length(toLight);
+    float radius = pointLightPos[i].w;
+    if (dist >= radius) {
+      continue;
+    }
+    float falloff = 1.0 - (dist * dist) / (radius * radius);
+    falloff *= falloff;
+    // wrap the lighting a little so floors and walls right next to a light still catch some of it
+    float facing = max(dot(normal, toLight / max(dist, 1.0)), 0.0) * 0.75 + 0.25;
+    light += pointLightColor[i].rgb * falloff * facing;
+  }
+
+  return color * min(light, vec3(2.0));
 }
 
 #ifdef ZBUF_DEBUG
