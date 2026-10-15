@@ -27,17 +27,116 @@ package com.natlight;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
+import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 import static com.natlight.NatLightPlugin.MAX_DISTANCE;
 import static com.natlight.NatLightPlugin.MAX_FOG_DEPTH;
 import com.natlight.config.AntiAliasingMode;
 import com.natlight.config.ColorBlindMode;
+import com.natlight.config.TimeMode;
 import com.natlight.config.UIScalingMode;
 
 @ConfigGroup(NatLightConfig.GROUP)
 public interface NatLightConfig extends Config
 {
 	String GROUP = "natlight";
+
+	@ConfigSection(
+		name = "Lighting",
+		description = "Sun, moon and day/night cycle settings.",
+		position = -10
+	)
+	String lightingSection = "lighting";
+
+	@ConfigItem(
+		keyName = "timeMode",
+		name = "Time of day",
+		description = "Run a day/night cycle, or keep the time fixed.",
+		position = -9,
+		section = lightingSection
+	)
+	default TimeMode timeMode()
+	{
+		return TimeMode.CYCLE;
+	}
+
+	@Range(
+		min = 1,
+		max = 240
+	)
+	@ConfigItem(
+		keyName = "dayLength",
+		name = "Day length (minutes)",
+		description = "How long the day lasts, from sunrise to sunset, in real minutes.",
+		position = -8,
+		section = lightingSection
+	)
+	default int dayLength()
+	{
+		return 20;
+	}
+
+	@Range(
+		min = 1,
+		max = 240
+	)
+	@ConfigItem(
+		keyName = "nightLength",
+		name = "Night length (minutes)",
+		description = "How long the night lasts, from sunset to sunrise, in real minutes.",
+		position = -7,
+		section = lightingSection
+	)
+	default int nightLength()
+	{
+		return 10;
+	}
+
+	@Range(
+		max = 23
+	)
+	@ConfigItem(
+		keyName = "staticHour",
+		name = "Static time (hour)",
+		description = "Hour of the day to use when Time of day is set to Static. Sunrise is 6, sunset is 18.",
+		position = -6,
+		section = lightingSection
+	)
+	default int staticHour()
+	{
+		return 12;
+	}
+
+	@Range(
+		max = 100
+	)
+	@ConfigItem(
+		keyName = "lightingStrength",
+		name = "Sun strength (%)",
+		description = "How strongly the sun and moon shade the scene. 0 keeps the stock shading.",
+		position = -5,
+		section = lightingSection
+	)
+	default int lightingStrength()
+	{
+		return 50;
+	}
+
+	@Range(
+		min = 10,
+		max = 100
+	)
+	@ConfigItem(
+		keyName = "nightBrightness",
+		name = "Night brightness (%)",
+		description = "How bright the scene stays at night.",
+		position = -4,
+		section = lightingSection
+	)
+	default int nightBrightness()
+	{
+		return 40;
+	}
 
 	@Range(
 		max = MAX_DISTANCE

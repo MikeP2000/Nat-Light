@@ -34,12 +34,25 @@ uniform float brightness;
 uniform float smoothBanding;
 uniform vec4 fogColor;
 uniform float textureLightMode;
+uniform vec3 lightDirection;
+uniform vec3 lightColor;
+uniform vec3 ambientColor;
+uniform int useLighting;
+
+layout(std140) uniform uniforms {
+  float cameraYaw;
+  float cameraPitch;
+  float cameraX;
+  float cameraY;
+  float cameraZ;
+};
 
 in vec4 fColor;
 noperspective centroid in float fHsl;
 flat in int fTextureId;
 in vec2 fUv;
 in float fFogAmount;
+in vec3 fWorldPos;
 #ifdef ZBUF_DEBUG
 in float fDepth;
 #endif
@@ -51,6 +64,19 @@ out vec4 FragColor;
 #if COLORBLIND_MODE > 0
 #include "colorblind.glsl"
 #endif
+
+// Shades the game's own (already lit) colors with the sun or moon and the ambient light.
+// Vertices carry no normals, so the face normal comes from the screen space derivatives
+// of the world position, flipped to face the camera.
+vec3 applyLighting(vec3 color) {
+  vec3 normal = normalize(cross(dFdx(fWorldPos), dFdy(fWorldPos)));
+  vec3 toCamera = vec3(cameraX, cameraY, cameraZ) - fWorldPos;
+  if (dot(normal, toCamera) < 0.0) {
+    normal = -normal;
+  }
+  float diffuse = max(dot(normal, lightDirection), 0.0);
+  return color * (ambientColor + lightColor * diffuse);
+}
 
 #ifdef ZBUF_DEBUG
 float linear_depth(float depth) {
@@ -85,6 +111,10 @@ void main() {
     vec3 hsl = vec3(int(fHsl) >> 10 & 63, int(fHsl) >> 7 & 7, int(fHsl) & 127);
     vec3 rgb = mix(fColor.rgb, hslToRgb(hsl), smoothBanding);
     c = vec4(rgb, fColor.a);
+  }
+
+  if (useLighting != 0) {
+    c.rgb = applyLighting(c.rgb);
   }
 
 #if COLORBLIND_MODE > 0

@@ -69,6 +69,7 @@ noperspective centroid out float fHsl;
 flat out int fTextureId;
 out vec2 fUv;
 out float fFogAmount;
+out vec3 fWorldPos;
 #ifdef ZBUF_DEBUG
 out float fDepth;
 #endif
@@ -89,6 +90,7 @@ void main() {
   vec3 rgb = hslToRgb(hsl);
 
   vec4 worldPos = entityProj * vert;
+  fWorldPos = worldPos.xyz;
   vec4 screenPos = worldProj * worldPos;
 #ifdef ZBUF_DEBUG
   fDepth = screenPos.z / screenPos.w;
