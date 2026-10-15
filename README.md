@@ -4,6 +4,16 @@ A RuneLite GPU renderer with natural lighting: a configurable day/night cycle, l
 
 Nat Light is a fork of RuneLite's stock GPU plugin (from `runelite-parent-1.13.2`), so it conflicts with the GPU plugin and turns it off when enabled.
 
+## Lighting settings
+
+- **Time of day:** run a day/night cycle, or keep a static time.
+- **Day length / Night length:** how many real minutes the day and the night each last in the cycle.
+- **Static time (hour):** the hour to hold when the time is static. Sunrise is 6, sunset is 18.
+- **Sun strength:** how strongly the sun and moon shade the scene. 0 keeps the stock shading.
+- **Night brightness:** how bright the scene stays at night.
+
+Underground areas and dungeons are not affected by the time of day.
+
 ## Running
 
 ```

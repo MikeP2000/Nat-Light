@@ -51,6 +51,7 @@ import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.Model;
 import net.runelite.api.Perspective;
+import net.runelite.api.Player;
 import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
@@ -58,6 +59,7 @@ import net.runelite.api.TextureProvider;
 import net.runelite.api.TileObject;
 import net.runelite.api.WorldEntity;
 import net.runelite.api.WorldView;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.CommandExecuted;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.PostClientTick;
@@ -72,7 +74,9 @@ import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.plugins.PluginManager;
 import com.natlight.config.AntiAliasingMode;
+import com.natlight.config.TimeMode;
 import com.natlight.config.UIScalingMode;
+import com.natlight.lighting.TimeOfDay;
 import com.natlight.template.Template;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.DrawManager;
@@ -274,6 +278,15 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniColorblindIntensity;
 	private int uniUiColorblindIntensity;
 	static int uniBase;
+	private int uniLightDirection;
+	private int uniLightColor;
+	private int uniAmbientColor;
+	private int uniUseLighting;
+
+	// Underground areas and dungeons sit above this world y coordinate, and stay unaffected by the time of day
+	private static final int UNDERGROUND_MIN_Y = 4500;
+	private final TimeOfDay timeOfDay = new TimeOfDay();
+	private final float[] baseSky = new float[3];
 
 	static final float[] IDENTITY = Mat4.identity();
 
@@ -644,6 +657,10 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniTextureAnimations = glGetUniformLocation(glProgram, "textureAnimations");
 		uniBase = glGetUniformLocation(glProgram, "base");
 		uniColorblindIntensity = glGetUniformLocation(glProgram, "colorblindIntensity");
+		uniLightDirection = glGetUniformLocation(glProgram, "lightDirection");
+		uniLightColor = glGetUniformLocation(glProgram, "lightColor");
+		uniAmbientColor = glGetUniformLocation(glProgram, "ambientColor");
+		uniUseLighting = glGetUniformLocation(glProgram, "useLighting");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
 		uniTexTargetDimensions = glGetUniformLocation(glUiProgram, "targetDimensions");
@@ -982,9 +999,12 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		// Setup uniforms
 		final int drawDistance = getDrawDistance();
 		final int fogDepth = config.fogDepth();
-		final int sky = client.getSkyboxColor();
+		final int sky = updateTimeOfDay(client.getSkyboxColor());
 		glUniform1i(uniUseFog, fogDepth > 0 ? 1 : 0);
 		glUniform4f(uniFogColor, (sky >> 16 & 0xFF) / 255f, (sky >> 8 & 0xFF) / 255f, (sky & 0xFF) / 255f, 1f);
+		glUniform3f(uniLightDirection, timeOfDay.lightDirection[0], timeOfDay.lightDirection[1], timeOfDay.lightDirection[2]);
+		glUniform3f(uniLightColor, timeOfDay.lightColor[0], timeOfDay.lightColor[1], timeOfDay.lightColor[2]);
+		glUniform3f(uniAmbientColor, timeOfDay.ambientColor[0], timeOfDay.ambientColor[1], timeOfDay.ambientColor[2]);
 		glUniform1i(uniFogDepth, fogDepth);
 		glUniform1i(uniDrawDistance, drawDistance * Perspective.LOCAL_TILE_SIZE);
 		glUniform1i(uniExpandedMapLoadingChunks, client.getExpandedMapLoading());
@@ -1028,9 +1048,50 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		glDepthFunc(GL_GREATER);
 		glEnable(GL_DEPTH_TEST);
 
+		// the skybox model is the sky itself, so it isn't lit by the sun
+		glUniform1i(uniUseLighting, 0);
 		drawSkybox(scene, sky, cameraX, cameraY, cameraZ);
+		glUniform1i(uniUseLighting, 1);
 
 		checkGLErrors();
+	}
+
+	/**
+	 * Updates the sun, moon and ambient light for this frame.
+	 *
+	 * @return the sky color tinted for the time of day
+	 */
+	private int updateTimeOfDay(int sky)
+	{
+		baseSky[0] = (sky >> 16 & 0xFF) / 255f;
+		baseSky[1] = (sky >> 8 & 0xFF) / 255f;
+		baseSky[2] = (sky & 0xFF) / 255f;
+
+		if (isUnderground())
+		{
+			timeOfDay.neutral(baseSky);
+		}
+		else
+		{
+			double angle = config.timeMode() == TimeMode.STATIC
+				? TimeOfDay.staticAngle(config.staticHour())
+				: TimeOfDay.cycleAngle(System.currentTimeMillis(), config.dayLength(), config.nightLength());
+			timeOfDay.update(angle, config.lightingStrength() / 100f, config.nightBrightness() / 100f, baseSky);
+		}
+
+		float[] c = timeOfDay.skyColor;
+		return Math.round(c[0] * 255f) << 16 | Math.round(c[1] * 255f) << 8 | Math.round(c[2] * 255f);
+	}
+
+	private boolean isUnderground()
+	{
+		Player player = client.getLocalPlayer();
+		if (player == null)
+		{
+			return false;
+		}
+		WorldPoint wp = WorldPoint.fromLocalInstance(client, player.getLocalLocation());
+		return wp != null && wp.getY() >= UNDERGROUND_MIN_Y;
 	}
 
 	private void drawSkybox(Scene scene, int sky, float cameraX, float cameraY, float cameraZ)
