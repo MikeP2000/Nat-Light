@@ -1,13 +1,13 @@
-package com.example;
+package com.natlight;
 
 import net.runelite.client.RuneLite;
 import net.runelite.client.externalplugins.ExternalPluginManager;
 
-public class ExamplePluginTest
+public class NatLightPluginTest
 {
 	public static void main(String[] args) throws Exception
 	{
-		ExternalPluginManager.loadBuiltin(ExamplePlugin.class);
+		ExternalPluginManager.loadBuiltin(NatLightPlugin.class);
 		RuneLite.main(args);
 	}
 }
