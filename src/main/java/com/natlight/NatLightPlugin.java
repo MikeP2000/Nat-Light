@@ -68,6 +68,8 @@ import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GroundObjectDespawned;
 import net.runelite.api.events.GroundObjectSpawned;
+import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.PostClientTick;
 import net.runelite.api.events.WallObjectDespawned;
 import net.runelite.api.events.WallObjectSpawned;
@@ -1116,6 +1118,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 				: 1f - (1f - DAYLIGHT_LIGHT_SOURCE_SCALE) * timeOfDay.daylight;
 			brightness = scale * config.lightSourceBrightness() / 100f;
 		}
+		lightManager.setInteriorEnabled(config.lightSources() && config.indoorLights());
 		lightManager.update(brightness);
 		glUniform1i(uniPointLightCount, lightManager.count);
 		if (lightManager.count > 0)
@@ -1171,6 +1174,18 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	public void onGroundObjectDespawned(GroundObjectDespawned event)
 	{
 		lightManager.objectDespawned(event.getGroundObject());
+	}
+
+	@Subscribe
+	public void onNpcSpawned(NpcSpawned event)
+	{
+		lightManager.npcSpawned(event.getNpc());
+	}
+
+	@Subscribe
+	public void onNpcDespawned(NpcDespawned event)
+	{
+		lightManager.npcDespawned(event.getNpc());
 	}
 
 	private boolean isUnderground()

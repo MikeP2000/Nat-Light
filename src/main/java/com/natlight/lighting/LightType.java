@@ -40,7 +40,9 @@ public enum LightType
 	CANDLE(1.00f, 0.70f, 0.35f, 3f, 0.6f, 80, 0.08f),
 	FURNACE(1.00f, 0.45f, 0.15f, 4f, 0.9f, 60, 0.06f),
 	LAVA(1.00f, 0.30f, 0.05f, 5f, 1.0f, 0, 0.05f),
-	FIRE_SPELL(1.00f, 0.45f, 0.10f, 4f, 1.2f, 0, 0.20f);
+	FIRE_SPELL(1.00f, 0.45f, 0.10f, 4f, 1.2f, 0, 0.20f),
+	// a soft ceiling light for buildings that have people in them but no light source of their own
+	INTERIOR(1.00f, 0.80f, 0.55f, 6f, 0.7f, 260, 0.02f);
 
 	final float r;
 	final float g;

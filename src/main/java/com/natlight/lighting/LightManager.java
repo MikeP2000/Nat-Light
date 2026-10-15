@@ -32,7 +32,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import net.runelite.api.Client;
+import net.runelite.api.Constants;
 import net.runelite.api.GameObject;
+import net.runelite.api.NPC;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
@@ -52,6 +54,10 @@ public class LightManager
 {
 	public static final int MAX_LIGHTS = 32;
 	private static final int MAX_DISTANCE = 25 * Perspective.LOCAL_TILE_SIZE;
+	// Interior lights are shared by every NPC in the same cell of this many tiles, so a building gets one or two, not one per person
+	private static final int INTERIOR_CELL_TILES = 5;
+	// Skip an interior light when a real light source is already this close
+	private static final int INTERIOR_SKIP_DISTANCE = 3 * Perspective.LOCAL_TILE_SIZE;
 
 	// Object names are matched word by word, so "Wall torch" is a torch but "Fire altar" is excluded below
 	private static final Map<String, LightType> NAME_WORDS = ImmutableMap.<String, LightType>builder()
@@ -117,6 +123,20 @@ public class LightManager
 	private final Map<Integer, LightType> typeCache = new HashMap<>();
 	private final Map<Long, Light> objectLights = new HashMap<>();
 	private final List<Light> candidates = new ArrayList<>();
+	private final Map<Integer, Integer> npcCells = new HashMap<>();
+	private final Map<Integer, InteriorLight> interiorLights = new HashMap<>();
+	private boolean interiorEnabled = true;
+
+	private static final class InteriorLight
+	{
+		final Light light;
+		int npcs;
+
+		InteriorLight(Light light)
+		{
+			this.light = light;
+		}
+	}
 	private boolean rescan = true;
 
 	/** xyz position and radius of each light picked this frame, in local units. */
@@ -134,14 +154,93 @@ public class LightManager
 	public void clear()
 	{
 		objectLights.clear();
+		npcCells.clear();
+		interiorLights.clear();
+	}
+
+	/** Turns the lights for occupied buildings on or off. Turning them on picks up NPCs already in the scene. */
+	public void setInteriorEnabled(boolean enabled)
+	{
+		if (enabled != interiorEnabled)
+		{
+			interiorEnabled = enabled;
+			rescan = true;
+		}
 	}
 
 	/** Forgets everything and scans the loaded scene once more, e.g. when the plugin starts. */
 	public void reset()
 	{
-		objectLights.clear();
+		clear();
 		typeCache.clear();
 		rescan = true;
+	}
+
+	/**
+	 * Lights the building an NPC is standing in when it spawns, if it is under a roof and the building has no
+	 * light source nearby. The light stays where the NPC spawned rather than following it around.
+	 */
+	public void npcSpawned(NPC npc)
+	{
+		if (!interiorEnabled || npc.getWorldView() == null || !npc.getWorldView().isTopLevel())
+		{
+			return;
+		}
+		WorldView wv = npc.getWorldView();
+		LocalPoint lp = npc.getLocalLocation();
+		int plane = wv.getPlane();
+		int sx = lp.getSceneX();
+		int sy = lp.getSceneY();
+		if (sx < 0 || sy < 0 || sx >= wv.getSizeX() || sy >= wv.getSizeY()
+			|| (wv.getTileSettings()[plane][sx][sy] & Constants.TILE_FLAG_UNDER_ROOF) == 0)
+		{
+			return;
+		}
+
+		int cell = (plane << 24) | ((sx / INTERIOR_CELL_TILES) << 12) | (sy / INTERIOR_CELL_TILES);
+		InteriorLight interior = interiorLights.get(cell);
+		if (interior == null)
+		{
+			int x = lp.getX();
+			int z = lp.getY();
+			if (hasObjectLightNear(x, z))
+			{
+				return;
+			}
+			int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
+			interior = new InteriorLight(new Light(LightType.INTERIOR, x, y, z));
+			interiorLights.put(cell, interior);
+		}
+		interior.npcs++;
+		npcCells.put(npc.getIndex(), cell);
+	}
+
+	public void npcDespawned(NPC npc)
+	{
+		Integer cell = npcCells.remove(npc.getIndex());
+		if (cell == null)
+		{
+			return;
+		}
+		InteriorLight interior = interiorLights.get(cell);
+		if (interior != null && --interior.npcs <= 0)
+		{
+			interiorLights.remove(cell);
+		}
+	}
+
+	private boolean hasObjectLightNear(int x, int z)
+	{
+		for (Light light : objectLights.values())
+		{
+			float dx = light.x - x;
+			float dz = light.z - z;
+			if (dx * dx + dz * dz < (float) INTERIOR_SKIP_DISTANCE * INTERIOR_SKIP_DISTANCE)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public void objectSpawned(TileObject object)
@@ -173,6 +272,7 @@ public class LightManager
 		if (rescan)
 		{
 			rescan = false;
+			clear();
 			scanScene();
 		}
 
@@ -190,6 +290,10 @@ public class LightManager
 		for (Light light : objectLights.values())
 		{
 			addCandidate(light, px, pz);
+		}
+		for (InteriorLight interior : interiorLights.values())
+		{
+			addCandidate(interior.light, px, pz);
 		}
 		for (Projectile projectile : client.getProjectiles())
 		{
@@ -242,6 +346,7 @@ public class LightManager
 		{
 			return;
 		}
+		// objects first, so NPC interiors can see the light sources already there
 		Scene scene = wv.getScene();
 		for (Tile[][] plane : scene.getTiles())
 		{
@@ -274,6 +379,10 @@ public class LightManager
 					}
 				}
 			}
+		}
+		for (NPC npc : wv.npcs())
+		{
+			npcSpawned(npc);
 		}
 	}
 

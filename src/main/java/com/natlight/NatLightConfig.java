@@ -150,6 +150,18 @@ public interface NatLightConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "indoorLights",
+		name = "Light occupied buildings",
+		description = "Add a soft ceiling light to buildings that have NPCs inside but no light source of their own.",
+		position = -3,
+		section = lightingSection
+	)
+	default boolean indoorLights()
+	{
+		return true;
+	}
+
 	@Range(
 		max = 200
 	)
