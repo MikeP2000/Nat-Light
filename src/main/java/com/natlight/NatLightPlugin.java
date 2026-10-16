@@ -1162,7 +1162,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		}
 		glActiveTexture(GL_TEXTURE0);
 		glUniform1i(uniBuildingMap, 2);
-		glUniform1i(uniDebugBuildings, config.indoorLights() && config.showBuildingMap() ? 1 : 0);
+		glUniform1i(uniDebugBuildings, config.showBuildingMap() ? 1 : 0);
 	}
 
 	@Subscribe

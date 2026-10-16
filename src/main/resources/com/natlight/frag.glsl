@@ -75,27 +75,41 @@ out vec4 FragColor;
 #include "colorblind.glsl"
 #endif
 
-// How much of a building's light reaches a point (in tile units): all of it inside the building, some of it where
-// it spills out. Tiles cut by an angled wall only count the half on the inside.
-float buildingShare(ivec2 tile, vec2 pos, ivec2 mapSize, uint building) {
+// The building map entry for a tile, or nothing for tiles off the map.
+uvec2 buildingTile(ivec2 tile, ivec2 mapSize) {
   if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, mapSize))) {
-    return 0.0;
+    return uvec2(0u);
   }
-  uvec2 v = texelFetch(buildingMap, tile, 0).rg;
-  if ((v.r & 0x0FFFu) == building) {
-    uint corner = v.r >> 13;
-    if (corner == 0u) {
-      return 1.0;
-    }
-    vec2 f = clamp(pos - vec2(tile), 0.0, 1.0);
-    // positive on the inside half
-    float side = corner == 1u ? f.x + f.y - 1.0  // north-east
-               : corner == 2u ? f.y - f.x        // north-west
-               : corner == 3u ? f.x - f.y        // south-east
-               : 1.0 - f.x - f.y;                // south-west
-    return smoothstep(-0.05, 0.05, side);
+  return texelFetch(buildingMap, tile, 0).rg;
+}
+
+// How much of a tile's building is at a point: all of it, or only the inside half of a tile cut by an angled wall.
+float cornerShare(uint v, ivec2 tile, vec2 pos) {
+  uint corner = v >> 13;
+  if (corner == 0u) {
+    return 1.0;
   }
-  if ((v.g & 0x3FFFu) == building) {
+  vec2 f = clamp(pos - vec2(tile), 0.0, 1.0);
+  // positive on the inside half
+  float side = corner == 1u ? f.x + f.y - 1.0  // north-east
+             : corner == 2u ? f.y - f.x        // north-west
+             : corner == 3u ? f.x - f.y        // south-east
+             : 1.0 - f.x - f.y;                // south-west
+  return smoothstep(-0.05, 0.05, side);
+}
+
+// How much of a light reaches a point on a tile (v is the tile's building map entry). Lights in a building get all
+// of it inside the building and some where it spills out of windows and doorways. Lights outdoors (building -1) get
+// none of it inside any building.
+float lightShare(uvec2 v, ivec2 tile, vec2 pos, int building) {
+  uint id = v.r & 0x0FFFu;
+  if (building < 0) {
+    return id == 0u ? 1.0 : 1.0 - cornerShare(v.r, tile, pos);
+  }
+  if (id == uint(building)) {
+    return cornerShare(v.r, tile, pos);
+  }
+  if ((v.g & 0x3FFFu) == uint(building)) {
     return float(v.g >> 14) * 0.5;
   }
   return 0.0;
@@ -125,20 +139,25 @@ vec3 applyLighting(vec3 color) {
   ivec2 floorTile = ivec2(floor(floorPos));
   vec2 floorFrac = fract(floorPos);
   float floorness = smoothstep(0.5, 0.9, abs(normal.y));
+  uvec2 wallV = buildingTile(wallTile, mapSize);
+  uvec2 hereV = buildingTile(hereTile, mapSize);
+  uvec2 floorV00 = buildingTile(floorTile, mapSize);
+  uvec2 floorV10 = buildingTile(floorTile + ivec2(1, 0), mapSize);
+  uvec2 floorV01 = buildingTile(floorTile + ivec2(0, 1), mapSize);
+  uvec2 floorV11 = buildingTile(floorTile + ivec2(1, 1), mapSize);
 
   for (int i = 0; i < pointLightCount; i++) {
     int building = pointLightBuilding[i];
     bool confined = building != 0;
     float share = 1.0;
     if (confined) {
-      uint b = uint(building);
-      float wallShare = buildingShare(wallTile, wallPos, mapSize, b);
+      float wallShare = lightShare(wallV, wallTile, wallPos, building);
       float floorShare = mix(
-        mix(buildingShare(floorTile, here, mapSize, b), buildingShare(floorTile + ivec2(1, 0), here, mapSize, b), floorFrac.x),
-        mix(buildingShare(floorTile + ivec2(0, 1), here, mapSize, b), buildingShare(floorTile + ivec2(1, 1), here, mapSize, b), floorFrac.x),
+        mix(lightShare(floorV00, floorTile, here, building), lightShare(floorV10, floorTile + ivec2(1, 0), here, building), floorFrac.x),
+        mix(lightShare(floorV01, floorTile + ivec2(0, 1), here, building), lightShare(floorV11, floorTile + ivec2(1, 1), here, building), floorFrac.x),
         floorFrac.y);
       // only blend on floors that get some of the light themselves, so it never creeps out past the walls
-      float own = buildingShare(hereTile, here, mapSize, b);
+      float own = lightShare(hereV, hereTile, here, building);
       floorShare = own <= 0.0 ? 0.0 : min(floorShare, own);
       share = mix(wallShare, floorShare, floorness);
       if (share <= 0.0) {
@@ -153,11 +172,10 @@ vec3 applyLighting(vec3 color) {
     }
     float falloff = 1.0 - (dist * dist) / (radius * radius);
     falloff *= falloff;
-    // wrap the lighting a little so floors and walls right next to a light still catch some of it
+    // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
+    // back of a wall stays dark.
     float facing = max(dot(normal, toLight / max(dist, 1.0)), 0.0);
-    if (!confined) {
-      facing = facing * 0.75 + 0.25;
-    }
+    facing = mix(facing, facing * 0.75 + 0.25, floorness);
     light += pointLightColor[i].rgb * falloff * facing * share;
   }
 
@@ -178,7 +196,7 @@ vec3 buildingDebug(vec3 color) {
   vec3 tint = vec3(0.0);
   float amount = 0.0;
   if (building != 0u) {
-    float inside = buildingShare(tile, here, mapSize, building);
+    float inside = cornerShare(v.r, tile, here);
     tint = (v.r & 0x1000u) != 0u ? vec3(0.1, 1.0, 0.2) : vec3(1.0, 0.15, 0.1);
     amount = 0.55 * inside;
     // outline the tiles so you can see where each one starts

@@ -111,12 +111,18 @@ public class LightManager
 		final float y;
 		final float z;
 		final float phase;
+		final int plane;
+		/** Lights placed by this class always stay in their building; others are worked out each frame. */
+		final boolean fixedBuilding;
+		/** Building the light is confined to, {@link #OUTSIDE} for outdoors, 0 for not confined. */
 		int building;
 		float distance;
 
-		Light(LightType type, float x, float y, float z)
+		Light(LightType type, float x, float y, float z, int plane, boolean fixedBuilding)
 		{
 			this.type = type;
+			this.plane = plane;
+			this.fixedBuilding = fixedBuilding;
 			this.x = x;
 			this.y = y;
 			this.z = z;
@@ -162,6 +168,8 @@ public class LightManager
 	/** Building ids above this don't fit in the mask, so those buildings get no light. */
 	private static final int MASK_MAX_BUILDING = 0x0FFF;
 	private static final int MASK_LIT = 0x1000;
+	/** Light building value for a light that is outdoors and must not shine into buildings. */
+	private static final int OUTSIDE = -1;
 	public int maskWidth = 1;
 	public int maskHeight = 1;
 	public boolean maskChanged = true;
@@ -232,7 +240,16 @@ public class LightManager
 		{
 			return;
 		}
-		objectLights.put(object.getHash(), new Light(type, object.getX(), object.getZ() - type.height, object.getY()));
+		int x = object.getX();
+		int z = object.getY();
+		if (object instanceof DecorativeObject)
+		{
+			// wall decorations sit on the face of their wall, so the offset says which side of it they light
+			DecorativeObject decoration = (DecorativeObject) object;
+			x += decoration.getXOffset();
+			z += decoration.getYOffset();
+		}
+		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
 	}
 
 	public void objectDespawned(TileObject object)
@@ -293,7 +310,8 @@ public class LightManager
 		{
 			if (projectile.getSourceActor() == player && FIRE_SPELL_PROJECTILES.contains(projectile.getId()))
 			{
-				addCandidate(new Light(LightType.FIRE_SPELL, (float) projectile.getX(), (float) projectile.getZ(), (float) projectile.getY()), px, pz);
+				addCandidate(new Light(LightType.FIRE_SPELL, (float) projectile.getX(), (float) projectile.getZ(),
+					(float) projectile.getY(), client.getTopLevelWorldView().getPlane(), false), px, pz);
 			}
 		}
 
@@ -318,9 +336,29 @@ public class LightManager
 			colors[o + 1] = type.g * level;
 			colors[o + 2] = type.b * level;
 			colors[o + 3] = 0f;
-			lightBuildings[i] = light.building;
+			lightBuildings[i] = light.fixedBuilding ? light.building : sideOf(light);
 		}
 		count = n;
+	}
+
+	/**
+	 * Which side of the walls a torch, stove or spell is on: the building it is in, or outdoors. The shader only lets
+	 * it light surfaces on that side, so it doesn't shine through walls.
+	 */
+	private int sideOf(Light light)
+	{
+		if (buildings == null || light.plane != buildingPlane)
+		{
+			return 0;
+		}
+		int tx = (int) Math.floor(light.x / Perspective.LOCAL_TILE_SIZE);
+		int ty = (int) Math.floor(light.z / Perspective.LOCAL_TILE_SIZE);
+		if (tx < 0 || ty < 0 || tx >= buildings.width || ty >= buildings.height)
+		{
+			return 0;
+		}
+		int b = buildings.building[tx][ty];
+		return b == 0 || b > MASK_MAX_BUILDING ? OUTSIDE : b;
 	}
 
 	private void addCandidate(Light light, float px, float pz)
@@ -388,7 +426,9 @@ public class LightManager
 
 		CollisionData[] maps = wv.getCollisionMaps();
 		int plane = buildingPlane;
-		if (!interiorEnabled || maps == null || maps[plane] == null)
+		// the map is built even with building lights off, since it also keeps torches and stoves on their side of
+		// the walls
+		if (maps == null || maps[plane] == null)
 		{
 			return;
 		}
@@ -511,6 +551,10 @@ public class LightManager
 	private void placeBuildingLights(WorldView wv)
 	{
 		buildingLights.clear();
+		if (!interiorEnabled)
+		{
+			return;
+		}
 		int plane = buildingPlane;
 		Map<Integer, int[]> cells = new HashMap<>();
 		for (int b = 0; b < buildings.buildingCount(); b++)
@@ -559,7 +603,7 @@ public class LightManager
 					continue;
 				}
 				int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
-				Light light = new Light(LightType.INTERIOR, x, y, z);
+				Light light = new Light(LightType.INTERIOR, x, y, z, plane, true);
 				light.building = b + 1;
 				buildingLights.add(light);
 			}
