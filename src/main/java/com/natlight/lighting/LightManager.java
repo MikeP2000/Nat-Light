@@ -26,6 +26,7 @@ package com.natlight.lighting;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -37,11 +38,13 @@ import net.runelite.api.CollisionData;
 import net.runelite.api.Constants;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
+import net.runelite.api.Model;
 import net.runelite.api.NPC;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
 import net.runelite.api.Projectile;
+import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
 import net.runelite.api.Tile;
 import net.runelite.api.TileObject;
@@ -93,6 +96,9 @@ public class LightManager
 		.put("forge", LightType.FURNACE)
 		.put("lava", LightType.LAVA)
 		.put("stall", LightType.STALL)
+		.put("booth", LightType.BOOTH)
+		// "Grand Exchange booth": comes before "booth", so the exchange booths can be found to light the plaza
+		.put("exchange", LightType.EXCHANGE_BOOTH)
 		.build();
 
 	// Words that mean the name isn't actually a light, e.g. "Fire altar" or "Fire obelisk"
@@ -155,6 +161,8 @@ public class LightManager
 	private boolean buildingsDirty = true;
 	private boolean interiorEnabled = true;
 	private final List<Light> buildingLights = new ArrayList<>();
+	// street lamps around the Grand Exchange, placed around its booths
+	private final List<Light> plazaLights = new ArrayList<>();
 	// lit buildings stay lit when the area reloads, keyed by the world position of their first tile
 	private final Set<Long> rememberedLit = new HashSet<>();
 	private boolean rememberedChanged;
@@ -180,6 +188,8 @@ public class LightManager
 	 */
 	public float[] lightData = new float[8];
 	public int staticCount;
+	/** The most light the ceiling lights may add up to anywhere, so rooms with several aren't brighter than others. */
+	public float interiorLimit;
 	/**
 	 * Which static lights reach each tile, {@link #GRID_SLOTS} per tile as light index + 1 (0 for none), in two RGBA
 	 * texels per tile, row-major. Only rebuilt when lights or buildings change.
@@ -199,6 +209,11 @@ public class LightManager
 	private static final int MASK_LIT = 0x1000;
 	/** Light building value for a light that is outdoors and must not shine into buildings. */
 	private static final int OUTSIDE = -1;
+	/** Added to a ceiling light's building in the light data, so the shader can even out overlapping ones. */
+	private static final int INTERIOR_FLAG = 8192;
+	private static final int PLAZA_MIN_BOOTHS = 4;
+	private static final int PLAZA_LAMPS = 12;
+	private static final float PLAZA_RADIUS = 11 * Perspective.LOCAL_TILE_SIZE;
 	/** Client cycles a new light takes to fade in. */
 	private static final int FADE_CYCLES = 60;
 	public int maskWidth = 1;
@@ -225,6 +240,11 @@ public class LightManager
 		{
 			previousLevels.put(light.key, light.level);
 		}
+		for (Light light : plazaLights)
+		{
+			previousLevels.put(light.key, light.level);
+		}
+		plazaLights.clear();
 		objectLights.clear();
 		lightsDirty = true;
 		buildingsDirty = true;
@@ -288,10 +308,28 @@ public class LightManager
 		int z = object.getY();
 		if (object instanceof DecorativeObject)
 		{
-			// wall decorations sit on the face of their wall, so the offset says which side of it they light
+			// a wall torch hangs on one face of its wall. The middle of its model says which face, so the light goes
+			// there and lights that side of the wall only.
 			DecorativeObject decoration = (DecorativeObject) object;
 			x += decoration.getXOffset();
 			z += decoration.getYOffset();
+			Renderable renderable = decoration.getRenderable();
+			Model model = renderable instanceof Model ? (Model) renderable : renderable != null ? renderable.getModel() : null;
+			if (model != null && model.getVerticesCount() > 0)
+			{
+				float[] vx = model.getVerticesX();
+				float[] vz = model.getVerticesZ();
+				float sx = 0;
+				float sz = 0;
+				int n = model.getVerticesCount();
+				for (int i = 0; i < n; i++)
+				{
+					sx += vx[i];
+					sz += vz[i];
+				}
+				x += Math.round(sx / n);
+				z += Math.round(sz / n);
+			}
 		}
 		// keyed on the first frame it's drawn, once the area has finished loading and its base is settled
 		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
@@ -358,6 +396,10 @@ public class LightManager
 		{
 			light.level = Math.min(1f, light.level + step);
 		}
+		for (Light light : plazaLights)
+		{
+			light.level = Math.min(1f, light.level + step);
+		}
 
 		if (lightsDirty && wv != null)
 		{
@@ -368,6 +410,7 @@ public class LightManager
 		count = 0;
 		Player player = client.getLocalPlayer();
 		float time = cycle / 50f * 2f * (float) Math.PI;
+		interiorLimit = LightType.INTERIOR.strength * brightness;
 		for (int i = 0; i < staticCount; i++)
 		{
 			Light light = staticLights.get(i);
@@ -423,6 +466,8 @@ public class LightManager
 		staticLights.clear();
 		staticLights.addAll(objectLights.values());
 		staticLights.addAll(buildingLights);
+		placePlazaLights();
+		staticLights.addAll(plazaLights);
 		Player player = client.getLocalPlayer();
 		if (staticLights.size() > MAX_STATIC_LIGHTS && player != null)
 		{
@@ -442,6 +487,9 @@ public class LightManager
 		int h = buildings != null ? buildings.height : wv.getSizeY();
 		short[][] slots = new short[w * h][];
 		float[][] scores = new float[w * h][];
+		int[] visited = new int[w * h];
+		int visit = 0;
+		ArrayDeque<Integer> queue = new ArrayDeque<>();
 		lightData = new float[Math.max(1, staticCount) * 8];
 		for (int i = 0; i < staticCount; i++)
 		{
@@ -456,28 +504,52 @@ public class LightManager
 			lightData[o + 1] = light.y;
 			lightData[o + 2] = light.z;
 			lightData[o + 3] = radius;
-			lightData[staticCount * 4 + o + 3] = light.building;
+			lightData[staticCount * 4 + o + 3] = light.building + (light.type == LightType.INTERIOR ? INTERIOR_FLAG : 0);
 
-			// tiles whose middle is within the radius plus a tile's half-diagonal and a bit
+			// spread out from the light's tile to tiles whose middle is within the radius plus a tile's half-diagonal
+			// and a bit, without crossing walls, so light from a campfire in a roofless hut stays inside the hut
 			float reach = radius + Perspective.LOCAL_TILE_SIZE;
-			int x0 = Math.max(0, (int) Math.floor((light.x - reach) / Perspective.LOCAL_TILE_SIZE));
-			int x1 = Math.min(w - 1, (int) Math.floor((light.x + reach) / Perspective.LOCAL_TILE_SIZE));
-			int y0 = Math.max(0, (int) Math.floor((light.z - reach) / Perspective.LOCAL_TILE_SIZE));
-			int y1 = Math.min(h - 1, (int) Math.floor((light.z + reach) / Perspective.LOCAL_TILE_SIZE));
-			for (int x = x0; x <= x1; x++)
+			int lx = (int) Math.floor(light.x / Perspective.LOCAL_TILE_SIZE);
+			int ly = (int) Math.floor(light.z / Perspective.LOCAL_TILE_SIZE);
+			if (lx < 0 || ly < 0 || lx >= w || ly >= h)
 			{
-				for (int y = y0; y <= y1; y++)
+				continue;
+			}
+			visit++;
+			visited[ly * w + lx] = visit;
+			queue.clear();
+			queue.add(ly * w + lx);
+			while (!queue.isEmpty())
+			{
+				int t = queue.poll();
+				int x = t % w;
+				int y = t / w;
+				float dx = (x + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.x;
+				float dz = (y + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.z;
+				float d = (float) Math.sqrt(dx * dx + dz * dz);
+				if (reaches(light.building, x, y))
 				{
-					float dx = (x + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.x;
-					float dz = (y + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.z;
-					float d = (float) Math.sqrt(dx * dx + dz * dz);
-					if (d > reach || !reaches(light.building, x, y))
+					// when a tile has more lights than slots, keep the ones that light it most
+					float f = Math.max(0f, 1f - d / reach);
+					addToTile(slots, scores, t, (short) (i + 1), light.type.strength * f * f);
+				}
+				for (int dir = 0; dir < 4; dir++)
+				{
+					int nx = x + BuildingMap.DX[dir];
+					int ny = y + BuildingMap.DY[dir];
+					if (nx < 0 || ny < 0 || nx >= w || ny >= h || visited[ny * w + nx] == visit
+						|| (buildings != null && !buildings.canSee(x, y, dir)))
 					{
 						continue;
 					}
-					// when a tile has more lights than slots, keep the ones that light it most
-					float f = Math.max(0f, 1f - d / reach);
-					addToTile(slots, scores, y * w + x, (short) (i + 1), light.type.strength * f * f);
+					float ndx = (nx + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.x;
+					float ndz = (ny + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.z;
+					if (ndx * ndx + ndz * ndz > reach * reach)
+					{
+						continue;
+					}
+					visited[ny * w + nx] = visit;
+					queue.add(ny * w + nx);
 				}
 			}
 		}
@@ -493,6 +565,62 @@ public class LightManager
 			}
 		}
 		gridChanged = true;
+	}
+
+	/**
+	 * Rings the Grand Exchange with street lamps. The exchange booths sit in a ring around its middle, so their
+	 * average position is the middle of the plaza.
+	 */
+	private void placePlazaLights()
+	{
+		Map<Long, Float> oldLevels = new HashMap<>();
+		for (Light light : plazaLights)
+		{
+			oldLevels.put(light.key, light.level);
+		}
+		plazaLights.clear();
+		WorldView wv = client.getTopLevelWorldView();
+		if (wv == null)
+		{
+			return;
+		}
+		float sx = 0;
+		float sz = 0;
+		int n = 0;
+		int plane = wv.getPlane();
+		for (Light light : objectLights.values())
+		{
+			if (light.type == LightType.EXCHANGE_BOOTH && light.plane == plane)
+			{
+				sx += light.x;
+				sz += light.z;
+				n++;
+			}
+		}
+		if (n < PLAZA_MIN_BOOTHS)
+		{
+			return;
+		}
+		float cx = sx / n;
+		float cz = sz / n;
+		for (int k = 0; k < PLAZA_LAMPS; k++)
+		{
+			double angle = (k + 0.5) * 2 * Math.PI / PLAZA_LAMPS;
+			int x = (int) (cx + Math.cos(angle) * PLAZA_RADIUS);
+			int z = (int) (cz + Math.sin(angle) * PLAZA_RADIUS);
+			if (x < 0 || z < 0 || x >= wv.getSizeX() * Perspective.LOCAL_TILE_SIZE || z >= wv.getSizeY() * Perspective.LOCAL_TILE_SIZE)
+			{
+				continue;
+			}
+			Light light = new Light(LightType.PLAZA, x, wv.getTileHeight(x, z, plane) - LightType.PLAZA.height, z, plane, false);
+			keyLight(light, wv.getBaseX(), wv.getBaseY());
+			Float level = oldLevels.containsKey(light.key) ? oldLevels.get(light.key) : previousLevels.get(light.key);
+			if (level != null)
+			{
+				light.level = level;
+			}
+			plazaLights.add(light);
+		}
 	}
 
 	private static void addToTile(short[][] slots, float[][] scores, int t, short light, float score)
@@ -827,7 +955,7 @@ public class LightManager
 				}
 				int x = (best >> 16) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
 				int z = (best & 0xFFFF) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
-				if (hasObjectLightNear(x, z))
+				if (hasObjectLightNear(x, z, b + 1))
 				{
 					continue;
 				}
@@ -845,10 +973,16 @@ public class LightManager
 		}
 	}
 
-	private boolean hasObjectLightNear(int x, int z)
+	/** Whether a real light that lights up the same building is already close by. */
+	private boolean hasObjectLightNear(int x, int z, int building)
 	{
 		for (Light light : objectLights.values())
 		{
+			// candles are too dim to light a room, and a torch on the other side of a wall doesn't light this one
+			if (light.type == LightType.CANDLE || sideOf(light) != building)
+			{
+				continue;
+			}
 			float dx = light.x - x;
 			float dz = light.z - z;
 			if (dx * dx + dz * dz < (float) INTERIOR_SKIP_DISTANCE * INTERIOR_SKIP_DISTANCE)

@@ -61,8 +61,9 @@ public class BuildingMap
 	public static final int CORNER_SE = 3;
 	public static final int CORNER_SW = 4;
 
-	private static final int[] DX = {0, 1, 0, -1};
-	private static final int[] DY = {1, 0, -1, 0};
+	/** Steps for directions north, east, south and west. */
+	static final int[] DX = {0, 1, 0, -1};
+	static final int[] DY = {1, 0, -1, 0};
 	private static final int[] MOVE = {
 		CollisionDataFlag.BLOCK_MOVEMENT_NORTH, CollisionDataFlag.BLOCK_MOVEMENT_EAST,
 		CollisionDataFlag.BLOCK_MOVEMENT_SOUTH, CollisionDataFlag.BLOCK_MOVEMENT_WEST,
@@ -154,9 +155,11 @@ public class BuildingMap
 
 	private void findBuildings(boolean[][] underRoof)
 	{
+		// first split the roofed area into rooms at anything that blocks movement, so a porch roof outside a wall or
+		// window stays separate from the room inside it
 		ArrayDeque<Integer> queue = new ArrayDeque<>();
+		List<int[]> rooms = new ArrayList<>();
 		List<Integer> tiles = new ArrayList<>();
-		int next = 1;
 		for (int x = 0; x < width; x++)
 		{
 			for (int y = 0; y < height; y++)
@@ -165,8 +168,9 @@ public class BuildingMap
 				{
 					continue;
 				}
+				int room = rooms.size() + 1;
 				tiles.clear();
-				building[x][y] = next;
+				building[x][y] = room;
 				queue.add(x << 16 | y);
 				while (!queue.isEmpty())
 				{
@@ -178,28 +182,91 @@ public class BuildingMap
 					{
 						int nx = tx + DX[d];
 						int ny = ty + DY[d];
-						// rooms split at doors, so a porch roof outside the front door stays separate
 						if (inBounds(nx, ny) && underRoof[nx][ny] && building[nx][ny] == 0 && !blocked(tx, ty, d))
 						{
-							building[nx][ny] = next;
+							building[nx][ny] = room;
 							queue.add(nx << 16 | ny);
 						}
 					}
 				}
-
-				if (tiles.size() < MIN_BUILDING_TILES || isOpen(tiles, next, underRoof))
-				{
-					// too small to be a building, e.g. a lone roofed tile, or roofed but not walled in
-					for (int t : tiles)
-					{
-						building[t >> 16][t & 0xFFFF] = -1;
-					}
-					continue;
-				}
-				buildingTiles.add(tiles.stream().mapToInt(Integer::intValue).toArray());
-				lit.add(false);
-				next++;
+				rooms.add(tiles.stream().mapToInt(Integer::intValue).toArray());
 			}
+		}
+
+		// then join walled-in rooms that are only split by something you can see over, like a shop counter or a rope
+		// barrier, so the whole room lights up together. Walls and doors still keep rooms apart.
+		int[] parent = new int[rooms.size() + 1];
+		boolean[] open = new boolean[rooms.size() + 1];
+		for (int r = 1; r <= rooms.size(); r++)
+		{
+			parent[r] = r;
+			open[r] = isOpen(rooms.get(r - 1), r, underRoof);
+		}
+		for (int r = 1; r <= rooms.size(); r++)
+		{
+			if (open[r])
+			{
+				continue;
+			}
+			for (int t : rooms.get(r - 1))
+			{
+				int tx = t >> 16;
+				int ty = t & 0xFFFF;
+				for (int d = 0; d < 4; d++)
+				{
+					int nx = tx + DX[d];
+					int ny = ty + DY[d];
+					if (!inBounds(nx, ny))
+					{
+						continue;
+					}
+					int other = building[nx][ny];
+					if (other > 0 && other != r && !open[other] && !sightBlocked(tx, ty, d) && !isDoor(tx, ty, d))
+					{
+						parent[find(parent, other)] = find(parent, r);
+					}
+				}
+			}
+		}
+
+		// gather the joined rooms into buildings, dropping ones too small or too open to be a building
+		List<List<Integer>> groups = new ArrayList<>();
+		int[] group = new int[rooms.size() + 1];
+		for (int r = 1; r <= rooms.size(); r++)
+		{
+			int root = find(parent, r);
+			if (group[root] == 0)
+			{
+				groups.add(new ArrayList<>());
+				group[root] = groups.size();
+			}
+			for (int t : rooms.get(r - 1))
+			{
+				groups.get(group[root] - 1).add(t);
+			}
+		}
+		int next = 1;
+		for (int g = 0; g < groups.size(); g++)
+		{
+			List<Integer> groupTiles = groups.get(g);
+			// mark the group with a temporary id no room uses, so isOpen sees its outline
+			int mark = -(g + 2);
+			for (int t : groupTiles)
+			{
+				building[t >> 16][t & 0xFFFF] = mark;
+			}
+			if (groupTiles.size() < MIN_BUILDING_TILES || isOpen(groupTiles.stream().mapToInt(Integer::intValue).toArray(), mark, underRoof))
+			{
+				// too small to be a building, e.g. a lone roofed tile, or roofed but not walled in
+				continue;
+			}
+			for (int t : groupTiles)
+			{
+				building[t >> 16][t & 0xFFFF] = next;
+			}
+			buildingTiles.add(groupTiles.stream().mapToInt(Integer::intValue).toArray());
+			lit.add(false);
+			next++;
 		}
 		for (int x = 0; x < width; x++)
 		{
@@ -211,6 +278,16 @@ public class BuildingMap
 				}
 			}
 		}
+	}
+
+	private static int find(int[] parent, int r)
+	{
+		while (parent[r] != r)
+		{
+			parent[r] = parent[parent[r]];
+			r = parent[r];
+		}
+		return r;
 	}
 
 	private void findAreas()
@@ -355,7 +432,7 @@ public class BuildingMap
 	}
 
 	/** Whether too much of an area's outline has no wall, e.g. the ground under a roof's overhang. */
-	private boolean isOpen(List<Integer> tiles, int id, boolean[][] underRoof)
+	private boolean isOpen(int[] tiles, int id, boolean[][] underRoof)
 	{
 		int outline = 0;
 		int open = 0;
@@ -383,7 +460,7 @@ public class BuildingMap
 			return true;
 		}
 		// a small roofed space with a gap in its side, such as an alcove under a wall walkway, isn't a building either
-		return open > 0 && (tiles.size() < MIN_OPEN_BUILDING_TILES || open > outline * MAX_OPEN_OUTLINE_SMALL);
+		return open > 0 && (tiles.length < MIN_OPEN_BUILDING_TILES || open > outline * MAX_OPEN_OUTLINE_SMALL);
 	}
 
 	private boolean walkable(int x, int y)
@@ -402,6 +479,12 @@ public class BuildingMap
 		int nx = x + DX[d];
 		int ny = y + DY[d];
 		return (flags[x][y] & MOVE[d]) != 0 || (flags[nx][ny] & MOVE[(d + 2) % 4]) != 0;
+	}
+
+	/** Whether you can see from tile (x, y) to its neighbour in direction d, i.e. no wall is in the way. */
+	public boolean canSee(int x, int y, int d)
+	{
+		return !sightBlocked(x, y, d);
 	}
 
 	private boolean sightBlocked(int x, int y, int d)

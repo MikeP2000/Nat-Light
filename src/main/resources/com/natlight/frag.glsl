@@ -51,6 +51,10 @@ uniform sampler2D lightData;
 // per tile, the lights (index + 1, 0 for none) from lightData that reach it, in two RGBA texels
 #define GRID_SLOTS 8
 uniform usampler2D lightGrid;
+// ceiling lights (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several of them
+// aren't brighter than rooms with one
+#define INTERIOR_FLAG 8192
+uniform float interiorLimit;
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
 // doorway (low 14 bits) and how strongly (top 2 bits, 1-2)
 uniform usampler2D buildingMap;
@@ -202,12 +206,15 @@ vec3 applyLighting(vec3 color) {
   sFloorV01 = buildingTile(sFloorTile + ivec2(0, 1), mapSize);
   sFloorV11 = buildingTile(sFloorTile + ivec2(1, 1), mapSize);
 
-  // lights that stay put: only the few the light grid lists for this tile
+  // lights that stay put: only the few the light grid lists for this tile. The grid stops light at walls, so walls
+  // use the tile their face looks onto.
+  ivec2 gridTile = sFloorness > 0.5 ? sHereTile : sWallTile;
   ivec2 gridSize = textureSize(lightGrid, 0);
-  if (all(greaterThanEqual(sHereTile, ivec2(0))) && sHereTile.x * 2 + 1 < gridSize.x && sHereTile.y < gridSize.y) {
+  vec3 interior = vec3(0.0);
+  if (all(greaterThanEqual(gridTile, ivec2(0))) && gridTile.x * 2 + 1 < gridSize.x && gridTile.y < gridSize.y) {
     uvec4 slots[2];
-    slots[0] = texelFetch(lightGrid, ivec2(sHereTile.x * 2, sHereTile.y), 0);
-    slots[1] = texelFetch(lightGrid, ivec2(sHereTile.x * 2 + 1, sHereTile.y), 0);
+    slots[0] = texelFetch(lightGrid, ivec2(gridTile.x * 2, gridTile.y), 0);
+    slots[1] = texelFetch(lightGrid, ivec2(gridTile.x * 2 + 1, gridTile.y), 0);
     for (int k = 0; k < GRID_SLOTS; k++) {
       uint index = slots[k >> 2][k & 3];
       if (index == 0u) {
@@ -216,16 +223,28 @@ vec3 applyLighting(vec3 color) {
       int i = int(index) - 1;
       vec4 posRadius = texelFetch(lightData, ivec2(i, 0), 0);
       vec4 colorBuilding = texelFetch(lightData, ivec2(i, 1), 0);
-      light += pointLight(posRadius, colorBuilding.rgb, int(colorBuilding.a));
+      int code = int(colorBuilding.a);
+      if (code >= INTERIOR_FLAG) {
+        interior += pointLight(posRadius, colorBuilding.rgb, code - INTERIOR_FLAG);
+      } else {
+        light += pointLight(posRadius, colorBuilding.rgb, code);
+      }
     }
   }
+  float interiorPeak = max(interior.r, max(interior.g, interior.b));
+  if (interiorPeak > interiorLimit) {
+    interior *= interiorLimit / interiorPeak;
+  }
+  light += interior;
 
   // moving lights
   for (int i = 0; i < pointLightCount; i++) {
     light += pointLight(pointLightPos[i], pointLightColor[i].rgb, pointLightBuilding[i]);
   }
 
-  return color * min(light, vec3(2.0));
+  // ease off above full brightness instead of clipping, so spots right next to a torch don't blow out
+  vec3 over = max(light - 1.0, 0.0);
+  return color * (min(light, vec3(1.0)) + over / (1.0 + over));
 }
 
 // Debug view of the building map: lit buildings green, buildings with no NPC red, light spilling out of windows and

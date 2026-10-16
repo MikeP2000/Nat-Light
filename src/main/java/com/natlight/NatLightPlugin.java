@@ -307,6 +307,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniBuildingMap;
 	private int uniLightData;
 	private int uniLightGrid;
+	private int uniInteriorLimit;
 	private int uniDebugBuildings;
 	// per-tile building ids that keep building lights inside their walls, bound to texture unit 2
 	private int buildingMapTexture = -1;
@@ -732,6 +733,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniBuildingMap = glGetUniformLocation(glProgram, "buildingMap");
 		uniLightData = glGetUniformLocation(glProgram, "lightData");
 		uniLightGrid = glGetUniformLocation(glProgram, "lightGrid");
+		uniInteriorLimit = glGetUniformLocation(glProgram, "interiorLimit");
 		uniDebugBuildings = glGetUniformLocation(glProgram, "debugBuildings");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
@@ -1215,6 +1217,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 2, GL_RGBA, GL_FLOAT, lightManager.lightData);
 		}
 		glUniform1i(uniLightData, 3);
+		glUniform1f(uniInteriorLimit, lightManager.interiorLimit);
 
 		// which of those lights reach each tile, only uploaded when it changes
 		if (lightGridTexture == -1)
