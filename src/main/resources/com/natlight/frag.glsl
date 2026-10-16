@@ -44,7 +44,8 @@ uniform int pointLightCount;
 uniform vec4 pointLightPos[MAX_POINT_LIGHTS];    // xyz position, w radius
 uniform vec4 pointLightColor[MAX_POINT_LIGHTS];  // rgb color times brightness
 uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is confined to, 0 for none
-// per tile of the player's plane: r = building id, g = building whose light spills in through a window or doorway
+// per tile of the player's plane: r = building id, g = building whose light spills in through a window or
+// doorway (low 14 bits) and how strongly (top 2 bits, 1-2)
 uniform usampler2D buildingMap;
 
 layout(std140) uniform uniforms {
@@ -73,6 +74,21 @@ out vec4 FragColor;
 #include "colorblind.glsl"
 #endif
 
+// How much of a building's light reaches a tile: all of it inside the building, some of it where it spills out
+float buildingShare(ivec2 tile, ivec2 mapSize, uint building) {
+  if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, mapSize))) {
+    return 0.0;
+  }
+  uvec2 v = texelFetch(buildingMap, tile, 0).rg;
+  if (v.r == building) {
+    return 1.0;
+  }
+  if ((v.g & 0x3FFFu) == building) {
+    return float(v.g >> 14) * 0.5;
+  }
+  return 0.0;
+}
+
 // Shades the game's own (already lit) colors with the sun or moon and the ambient light.
 // Vertices carry no normals, so the face normal comes from the screen space derivatives
 // of the world position, flipped to face the camera.
@@ -85,21 +101,35 @@ vec3 applyLighting(vec3 color) {
   float diffuse = max(dot(normal, lightDirection), 0.0);
   vec3 light = ambientColor + lightColor * diffuse;
 
-  // Which building this surface belongs to. Sampling a little way along the normal puts the outside face of a
-  // wall outside the building and the inside face inside it, so walls block building lights.
-  vec3 samplePos = fWorldPos + normal * 24.0;
-  ivec2 tile = ivec2(floor(samplePos.xz / 128.0));
+  // Which building a surface belongs to. Walls use the tile just along their normal, so a wall's outside face
+  // counts as outside and blocks the light. Floors blend the four nearest tiles, so the light fades across tile
+  // edges instead of stopping in hard squares.
   ivec2 mapSize = textureSize(buildingMap, 0);
-  uvec2 here = uvec2(0u);
-  if (all(greaterThanEqual(tile, ivec2(0))) && all(lessThan(tile, mapSize))) {
-    here = texelFetch(buildingMap, tile, 0).rg;
-  }
+  ivec2 wallTile = ivec2(floor((fWorldPos.xz + normal.xz * 24.0) / 128.0));
+  vec2 floorPos = fWorldPos.xz / 128.0 - 0.5;
+  ivec2 floorTile = ivec2(floor(floorPos));
+  vec2 floorFrac = fract(floorPos);
+  float floorness = smoothstep(0.5, 0.9, abs(normal.y));
 
   for (int i = 0; i < pointLightCount; i++) {
     int building = pointLightBuilding[i];
     bool confined = building != 0;
-    if (confined && uint(building) != here.r && uint(building) != here.g) {
-      continue;
+    float share = 1.0;
+    if (confined) {
+      uint b = uint(building);
+      float wallShare = buildingShare(wallTile, mapSize, b);
+      float floorShare = mix(
+        mix(buildingShare(floorTile, mapSize, b), buildingShare(floorTile + ivec2(1, 0), mapSize, b), floorFrac.x),
+        mix(buildingShare(floorTile + ivec2(0, 1), mapSize, b), buildingShare(floorTile + ivec2(1, 1), mapSize, b), floorFrac.x),
+        floorFrac.y);
+      // only blend on floors that get some of the light themselves, so it never creeps out past the walls
+      if (buildingShare(ivec2(floor(fWorldPos.xz / 128.0)), mapSize, b) <= 0.0) {
+        floorShare = 0.0;
+      }
+      share = mix(wallShare, floorShare, floorness);
+      if (share <= 0.0) {
+        continue;
+      }
     }
     vec3 toLight = pointLightPos[i].xyz - fWorldPos;
     float dist = length(toLight);
@@ -114,7 +144,7 @@ vec3 applyLighting(vec3 color) {
     if (!confined) {
       facing = facing * 0.75 + 0.25;
     }
-    light += pointLightColor[i].rgb * falloff * facing;
+    light += pointLightColor[i].rgb * falloff * facing * share;
   }
 
   return color * min(light, vec3(2.0));

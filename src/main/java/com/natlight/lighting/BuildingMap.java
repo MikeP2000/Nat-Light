@@ -30,8 +30,9 @@ import java.util.List;
 import net.runelite.api.CollisionDataFlag;
 
 /**
- * Splits one plane of the scene into buildings (connected areas under a roof, separated by walls) and works out
- * which buildings an NPC could walk into. Doors count as passable, since NPCs and players can open them.
+ * Splits one plane of the scene into buildings (connected areas under a roof, separated by walls and doors) and
+ * works out which buildings an NPC could walk into. For walking, doors count as passable, since NPCs and players
+ * can open them.
  * <p>
  * It also marks where a building's light may spill outside: up to two tiles out through windows and open doorways.
  * A window is a wall named as one, or a wall that blocks movement but not line of sight.
@@ -40,6 +41,11 @@ public class BuildingMap
 {
 	static final int MIN_BUILDING_TILES = 4;
 	private static final int SPILL_TILES = 2;
+	// A roofed area with more of its outline open than this is an overhang or canopy, not a room
+	private static final float MAX_OPEN_OUTLINE = 0.3f;
+	/** Spill values carry the building id in the low 14 bits and how strong the spill is (1-2) above them. */
+	public static final int SPILL_ID_MASK = 0x3FFF;
+	public static final int SPILL_LEVEL_SHIFT = 14;
 
 	private static final int[] DX = {0, 1, 0, -1};
 	private static final int[] DY = {1, 0, -1, 0};
@@ -56,7 +62,10 @@ public class BuildingMap
 	public final int height;
 	/** Building id of each tile, 0 outside any building. Ids start at 1. */
 	public final int[][] building;
-	/** Building whose light may spill onto each tile through a window or doorway, 0 for none. */
+	/**
+	 * Building whose light may spill onto each tile through a window or doorway, with its strength
+	 * (2 next to the opening, 1 a tile further out), or 0 for none. See {@link #SPILL_ID_MASK}.
+	 */
 	public final int[][] spill;
 	/** Tiles of each building, as x << 16 | y, indexed by id - 1. */
 	public final List<int[]> buildingTiles = new ArrayList<>();
@@ -151,7 +160,8 @@ public class BuildingMap
 					{
 						int nx = tx + DX[d];
 						int ny = ty + DY[d];
-						if (inBounds(nx, ny) && underRoof[nx][ny] && building[nx][ny] == 0 && canPass(tx, ty, d))
+						// rooms split at doors, so a porch roof outside the front door stays separate
+						if (inBounds(nx, ny) && underRoof[nx][ny] && building[nx][ny] == 0 && !blocked(tx, ty, d))
 						{
 							building[nx][ny] = next;
 							queue.add(nx << 16 | ny);
@@ -159,9 +169,9 @@ public class BuildingMap
 					}
 				}
 
-				if (tiles.size() < MIN_BUILDING_TILES)
+				if (tiles.size() < MIN_BUILDING_TILES || isOpen(tiles, next, underRoof))
 				{
-					// too small to be a building, e.g. a lone roofed tile
+					// too small to be a building, e.g. a lone roofed tile, or roofed but not walled in
 					for (int t : tiles)
 					{
 						building[t >> 16][t & 0xFFFF] = -1;
@@ -264,14 +274,42 @@ public class BuildingMap
 						{
 							break;
 						}
-						if (spill[sx][sy] == 0)
+						int level = SPILL_TILES - i;
+						if ((spill[sx][sy] >> SPILL_LEVEL_SHIFT) < level)
 						{
-							spill[sx][sy] = b;
+							spill[sx][sy] = b | level << SPILL_LEVEL_SHIFT;
 						}
 					}
 				}
 			}
 		}
+	}
+
+	/** Whether too much of an area's outline has no wall, e.g. the ground under a roof's overhang. */
+	private boolean isOpen(List<Integer> tiles, int id, boolean[][] underRoof)
+	{
+		int outline = 0;
+		int open = 0;
+		for (int t : tiles)
+		{
+			int tx = t >> 16;
+			int ty = t & 0xFFFF;
+			for (int d = 0; d < 4; d++)
+			{
+				int nx = tx + DX[d];
+				int ny = ty + DY[d];
+				if (inBounds(nx, ny) && building[nx][ny] == id)
+				{
+					continue;
+				}
+				outline++;
+				if (inBounds(nx, ny) && !underRoof[nx][ny] && !blocked(tx, ty, d) && !isDoor(tx, ty, d))
+				{
+					open++;
+				}
+			}
+		}
+		return open > outline * MAX_OPEN_OUTLINE;
 	}
 
 	private boolean walkable(int x, int y)
