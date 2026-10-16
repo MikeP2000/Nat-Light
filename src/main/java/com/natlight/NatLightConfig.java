@@ -181,7 +181,7 @@ public interface NatLightConfig extends Config
 		keyName = "showBuildingMap",
 		name = "Show building map (debug)",
 		description = "Color the ground by how building lights see it: green for lit buildings, red for buildings with no NPC,"
-			+ " blue where light spills out of windows and doorways, and a white dot under each building light.",
+			+ " blue where light spills out of windows and doorways, and a white dot under each light.",
 		position = -1,
 		section = lightingSection
 	)

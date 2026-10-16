@@ -305,9 +305,14 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniPointLightColor;
 	private int uniPointLightBuilding;
 	private int uniBuildingMap;
+	private int uniLightData;
+	private int uniLightGrid;
 	private int uniDebugBuildings;
 	// per-tile building ids that keep building lights inside their walls, bound to texture unit 2
 	private int buildingMapTexture = -1;
+	private int lightDataTexture = -1;
+	private int lightDataWidth;
+	private int lightGridTexture = -1;
 
 	// Underground areas and dungeons sit above this world y coordinate, and stay unaffected by the time of day
 	private static final int UNDERGROUND_MIN_Y = 4500;
@@ -520,6 +525,16 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 					glDeleteTextures(buildingMapTexture);
 					buildingMapTexture = -1;
 				}
+				if (lightDataTexture != -1)
+				{
+					glDeleteTextures(lightDataTexture);
+					lightDataTexture = -1;
+				}
+				if (lightGridTexture != -1)
+				{
+					glDeleteTextures(lightGridTexture);
+					lightGridTexture = -1;
+				}
 
 				root.free();
 
@@ -715,6 +730,8 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniPointLightColor = glGetUniformLocation(glProgram, "pointLightColor");
 		uniPointLightBuilding = glGetUniformLocation(glProgram, "pointLightBuilding");
 		uniBuildingMap = glGetUniformLocation(glProgram, "buildingMap");
+		uniLightData = glGetUniformLocation(glProgram, "lightData");
+		uniLightGrid = glGetUniformLocation(glProgram, "lightGrid");
 		uniDebugBuildings = glGetUniformLocation(glProgram, "debugBuildings");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
@@ -1166,13 +1183,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 
 		if (buildingMapTexture == -1)
 		{
-			buildingMapTexture = glGenTextures();
-			glActiveTexture(GL_TEXTURE2);
-			glBindTexture(GL_TEXTURE_2D, buildingMapTexture);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			buildingMapTexture = createDataTexture(GL_TEXTURE2);
 			lightManager.maskChanged = true;
 		}
 		glActiveTexture(GL_TEXTURE2);
@@ -1183,9 +1194,58 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16UI, lightManager.maskWidth, lightManager.maskHeight, 0,
 				GL_RG_INTEGER, GL_UNSIGNED_SHORT, lightManager.buildingMask);
 		}
-		glActiveTexture(GL_TEXTURE0);
 		glUniform1i(uniBuildingMap, 2);
+
+		// the lights that stay put, refreshed every frame for flicker and fading
+		if (lightDataTexture == -1)
+		{
+			lightDataTexture = createDataTexture(GL_TEXTURE3);
+			lightDataWidth = 0;
+		}
+		glActiveTexture(GL_TEXTURE3);
+		glBindTexture(GL_TEXTURE_2D, lightDataTexture);
+		int width = Math.max(1, lightManager.staticCount);
+		if (width != lightDataWidth)
+		{
+			lightDataWidth = width;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, 2, 0, GL_RGBA, GL_FLOAT, lightManager.lightData);
+		}
+		else
+		{
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 2, GL_RGBA, GL_FLOAT, lightManager.lightData);
+		}
+		glUniform1i(uniLightData, 3);
+
+		// which of those lights reach each tile, only uploaded when it changes
+		if (lightGridTexture == -1)
+		{
+			lightGridTexture = createDataTexture(GL_TEXTURE4);
+			lightManager.gridChanged = true;
+		}
+		glActiveTexture(GL_TEXTURE4);
+		glBindTexture(GL_TEXTURE_2D, lightGridTexture);
+		if (lightManager.gridChanged)
+		{
+			lightManager.gridChanged = false;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16UI, lightManager.gridWidth, lightManager.gridHeight, 0,
+				GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, lightManager.lightGrid);
+		}
+		glUniform1i(uniLightGrid, 4);
+		glActiveTexture(GL_TEXTURE0);
 		glUniform1i(uniDebugBuildings, config.showBuildingMap() ? 1 : 0);
+	}
+
+	/** A texture of raw values read with texelFetch, so no filtering or wrapping. */
+	private static int createDataTexture(int unit)
+	{
+		int texture = glGenTextures();
+		glActiveTexture(unit);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return texture;
 	}
 
 	@Subscribe

@@ -56,8 +56,12 @@ import net.runelite.api.gameval.SpotanimID;
  */
 public class LightManager
 {
-	public static final int MAX_LIGHTS = 32;
-	private static final int MAX_DISTANCE = 25 * Perspective.LOCAL_TILE_SIZE;
+	/** Moving lights (spells), which every pixel checks. */
+	public static final int MAX_DYNAMIC_LIGHTS = 8;
+	/** Lights that stay put (objects, buildings), which pixels only check when the light reaches their tile. */
+	public static final int MAX_STATIC_LIGHTS = 1023;
+	/** Lights each tile can list, in two RGBA texels of the light grid. */
+	public static final int GRID_SLOTS = 8;
 	// Buildings get one ceiling light per cell of this many tiles that the building covers enough of
 	private static final int INTERIOR_CELL_TILES = 5;
 	private static final int INTERIOR_CELL_MIN_TILES = 3;
@@ -139,7 +143,8 @@ public class LightManager
 	private final Client client;
 	private final Map<Integer, LightType> typeCache = new HashMap<>();
 	private final Map<Long, Light> objectLights = new HashMap<>();
-	private final List<Light> candidates = new ArrayList<>();
+	private final List<Light> staticLights = new ArrayList<>();
+	private boolean lightsDirty = true;
 	private boolean rescan = true;
 
 	// Buildings on the player's plane, and the ones lit because an NPC is in them or can walk to them
@@ -161,13 +166,28 @@ public class LightManager
 	private static final int EDGE_DOOR = 1;
 	private static final int EDGE_WINDOW = 2;
 
-	/** xyz position and radius of each light picked this frame, in local units. */
-	public final float[] positions = new float[MAX_LIGHTS * 4];
-	/** rgb color times brightness of each light picked this frame. */
-	public final float[] colors = new float[MAX_LIGHTS * 4];
-	/** Building each light picked this frame belongs to, or 0 for lights that aren't confined to a building. */
-	public final int[] lightBuildings = new int[MAX_LIGHTS];
+	/** xyz position and radius of each moving light this frame, in local units. */
+	public final float[] positions = new float[MAX_DYNAMIC_LIGHTS * 4];
+	/** rgb color times brightness of each moving light this frame. */
+	public final float[] colors = new float[MAX_DYNAMIC_LIGHTS * 4];
+	/** Building each moving light belongs to, {@link #OUTSIDE} outdoors, or 0 for lights that aren't confined. */
+	public final int[] lightBuildings = new int[MAX_DYNAMIC_LIGHTS];
 	public int count;
+
+	/**
+	 * The lights that stay put, as a texture two rows high: xyz position and radius in the first row, rgb color times
+	 * brightness and building in the second. Refilled every frame for flicker and fading.
+	 */
+	public float[] lightData = new float[8];
+	public int staticCount;
+	/**
+	 * Which static lights reach each tile, {@link #GRID_SLOTS} per tile as light index + 1 (0 for none), in two RGBA
+	 * texels per tile, row-major. Only rebuilt when lights or buildings change.
+	 */
+	public short[] lightGrid = new short[GRID_SLOTS];
+	public int gridWidth = 1;
+	public int gridHeight = 1;
+	public boolean gridChanged = true;
 
 	/**
 	 * Building id (with angled-corner half) and spill of each tile on the player's plane, two shorts per tile in
@@ -181,8 +201,6 @@ public class LightManager
 	private static final int OUTSIDE = -1;
 	/** Client cycles a new light takes to fade in. */
 	private static final int FADE_CYCLES = 60;
-	/** Distance in local units over which lights fade out before the nearest-lights cut off. */
-	private static final float CUTOFF_FADE = 3 * Perspective.LOCAL_TILE_SIZE;
 	public int maskWidth = 1;
 	public int maskHeight = 1;
 	public boolean maskChanged = true;
@@ -208,6 +226,7 @@ public class LightManager
 			previousLevels.put(light.key, light.level);
 		}
 		objectLights.clear();
+		lightsDirty = true;
 		buildingsDirty = true;
 	}
 
@@ -276,11 +295,15 @@ public class LightManager
 		}
 		// keyed on the first frame it's drawn, once the area has finished loading and its base is settled
 		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
+		lightsDirty = true;
 	}
 
 	public void objectDespawned(TileObject object)
 	{
-		objectLights.remove(object.getHash());
+		if (objectLights.remove(object.getHash()) != null)
+		{
+			lightsDirty = true;
+		}
 	}
 
 	/** Doors opening and closing change which buildings connect, so they trigger a rebuild. */
@@ -336,64 +359,202 @@ public class LightManager
 			light.level = Math.min(1f, light.level + step);
 		}
 
+		if (lightsDirty && wv != null)
+		{
+			lightsDirty = false;
+			rebuildGrid(wv);
+		}
+
 		count = 0;
 		Player player = client.getLocalPlayer();
+		float time = cycle / 50f * 2f * (float) Math.PI;
+		for (int i = 0; i < staticCount; i++)
+		{
+			Light light = staticLights.get(i);
+			float level = player == null ? 0f : level(light, brightness, time);
+			int o = i * 4 + staticCount * 4;
+			lightData[o] = light.type.r * level;
+			lightData[o + 1] = light.type.g * level;
+			lightData[o + 2] = light.type.b * level;
+		}
 		if (player == null || brightness <= 0f)
 		{
 			return;
 		}
-		LocalPoint origin = player.getLocalLocation();
-		float px = origin.getX();
-		float pz = origin.getY();
 
-		candidates.clear();
-		for (Light light : objectLights.values())
-		{
-			addCandidate(light, px, pz);
-		}
-		for (Light light : buildingLights)
-		{
-			addCandidate(light, px, pz);
-		}
 		for (Projectile projectile : client.getProjectiles())
 		{
-			if (projectile.getSourceActor() == player && FIRE_SPELL_PROJECTILES.contains(projectile.getId()))
+			if (count < MAX_DYNAMIC_LIGHTS && projectile.getSourceActor() == player
+				&& FIRE_SPELL_PROJECTILES.contains(projectile.getId()))
 			{
 				Light light = new Light(LightType.FIRE_SPELL, (float) projectile.getX(), (float) projectile.getZ(),
 					(float) projectile.getY(), client.getTopLevelWorldView().getPlane(), false);
 				light.level = 1f;
-				addCandidate(light, px, pz);
+				float level = level(light, brightness, time);
+				int o = count * 4;
+				positions[o] = light.x;
+				positions[o + 1] = light.y;
+				positions[o + 2] = light.z;
+				positions[o + 3] = light.type.radius * Perspective.LOCAL_TILE_SIZE;
+				colors[o] = light.type.r * level;
+				colors[o + 1] = light.type.g * level;
+				colors[o + 2] = light.type.b * level;
+				colors[o + 3] = 0f;
+				lightBuildings[count] = sideOf(light);
+				count++;
+			}
+		}
+	}
+
+	private static float level(Light light, float brightness, float time)
+	{
+		// two out-of-step waves make the flicker look less mechanical
+		float wobble = (float) (Math.sin(time * 1.3f + light.phase) * 0.6 + Math.sin(time * 3.1f + light.phase * 2f) * 0.4);
+		return light.type.strength * brightness * (1f + light.type.flicker * wobble) * light.level;
+	}
+
+	/**
+	 * Lays out the lights that stay put and works out which of them reach each tile, so each pixel only checks the
+	 * few lights near it. Lights confined to a building only list the tiles of that building and where it spills out
+	 * of windows; lights outdoors skip the inside of buildings.
+	 */
+	private void rebuildGrid(WorldView wv)
+	{
+		staticLights.clear();
+		staticLights.addAll(objectLights.values());
+		staticLights.addAll(buildingLights);
+		Player player = client.getLocalPlayer();
+		if (staticLights.size() > MAX_STATIC_LIGHTS && player != null)
+		{
+			// far more lights than this is unheard of, but if it happens keep the ones nearest the player
+			LocalPoint origin = player.getLocalLocation();
+			for (Light light : staticLights)
+			{
+				float dx = light.x - origin.getX();
+				float dz = light.z - origin.getY();
+				light.distance = dx * dx + dz * dz;
+			}
+			staticLights.sort((a, b) -> Float.compare(a.distance, b.distance));
+		}
+		staticCount = Math.min(staticLights.size(), MAX_STATIC_LIGHTS);
+
+		int w = buildings != null ? buildings.width : wv.getSizeX();
+		int h = buildings != null ? buildings.height : wv.getSizeY();
+		short[][] slots = new short[w * h][];
+		float[][] scores = new float[w * h][];
+		lightData = new float[Math.max(1, staticCount) * 8];
+		for (int i = 0; i < staticCount; i++)
+		{
+			Light light = staticLights.get(i);
+			if (!light.fixedBuilding)
+			{
+				light.building = sideOf(light);
+			}
+			float radius = light.type.radius * Perspective.LOCAL_TILE_SIZE;
+			int o = i * 4;
+			lightData[o] = light.x;
+			lightData[o + 1] = light.y;
+			lightData[o + 2] = light.z;
+			lightData[o + 3] = radius;
+			lightData[staticCount * 4 + o + 3] = light.building;
+
+			// tiles whose middle is within the radius plus a tile's half-diagonal and a bit
+			float reach = radius + Perspective.LOCAL_TILE_SIZE;
+			int x0 = Math.max(0, (int) Math.floor((light.x - reach) / Perspective.LOCAL_TILE_SIZE));
+			int x1 = Math.min(w - 1, (int) Math.floor((light.x + reach) / Perspective.LOCAL_TILE_SIZE));
+			int y0 = Math.max(0, (int) Math.floor((light.z - reach) / Perspective.LOCAL_TILE_SIZE));
+			int y1 = Math.min(h - 1, (int) Math.floor((light.z + reach) / Perspective.LOCAL_TILE_SIZE));
+			for (int x = x0; x <= x1; x++)
+			{
+				for (int y = y0; y <= y1; y++)
+				{
+					float dx = (x + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.x;
+					float dz = (y + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.z;
+					float d = (float) Math.sqrt(dx * dx + dz * dz);
+					if (d > reach || !reaches(light.building, x, y))
+					{
+						continue;
+					}
+					// when a tile has more lights than slots, keep the ones that light it most
+					float f = Math.max(0f, 1f - d / reach);
+					addToTile(slots, scores, y * w + x, (short) (i + 1), light.type.strength * f * f);
+				}
 			}
 		}
 
-		candidates.sort((a, b) -> Float.compare(a.distance, b.distance));
-
-		float time = client.getGameCycle() / 50f * 2f * (float) Math.PI;
-		int n = Math.min(MAX_LIGHTS, candidates.size());
-		// when there are more lights than fit, dim the farthest ones as they near the cut off, so they fade out as
-		// the player walks away instead of switching off
-		float cutoff = candidates.size() > MAX_LIGHTS ? (float) Math.sqrt(candidates.get(MAX_LIGHTS).distance) : Float.MAX_VALUE;
-		for (int i = 0; i < n; i++)
+		gridWidth = w * 2;
+		gridHeight = h;
+		lightGrid = new short[w * h * GRID_SLOTS];
+		for (int t = 0; t < w * h; t++)
 		{
-			Light light = candidates.get(i);
-			LightType type = light.type;
-			// two out-of-step waves make the flicker look less mechanical
-			float wobble = (float) (Math.sin(time * 1.3f + light.phase) * 0.6 + Math.sin(time * 3.1f + light.phase * 2f) * 0.4);
-			float edge = Math.min(1f, Math.max(0f, (cutoff - (float) Math.sqrt(light.distance)) / CUTOFF_FADE));
-			float level = type.strength * brightness * (1f + type.flicker * wobble) * light.level * edge * edge * (3f - 2f * edge);
-
-			int o = i * 4;
-			positions[o] = light.x;
-			positions[o + 1] = light.y;
-			positions[o + 2] = light.z;
-			positions[o + 3] = type.radius * Perspective.LOCAL_TILE_SIZE;
-			colors[o] = type.r * level;
-			colors[o + 1] = type.g * level;
-			colors[o + 2] = type.b * level;
-			colors[o + 3] = 0f;
-			lightBuildings[i] = light.fixedBuilding ? light.building : sideOf(light);
+			if (slots[t] != null)
+			{
+				System.arraycopy(slots[t], 0, lightGrid, t * GRID_SLOTS, GRID_SLOTS);
+			}
 		}
-		count = n;
+		gridChanged = true;
+	}
+
+	private static void addToTile(short[][] slots, float[][] scores, int t, short light, float score)
+	{
+		if (slots[t] == null)
+		{
+			slots[t] = new short[GRID_SLOTS];
+			scores[t] = new float[GRID_SLOTS];
+		}
+		short[] tile = slots[t];
+		float[] tileScores = scores[t];
+		int weakest = 0;
+		for (int k = 0; k < GRID_SLOTS; k++)
+		{
+			if (tile[k] == 0)
+			{
+				tile[k] = light;
+				tileScores[k] = score;
+				return;
+			}
+			if (tileScores[k] < tileScores[weakest])
+			{
+				weakest = k;
+			}
+		}
+		if (score > tileScores[weakest])
+		{
+			tile[weakest] = light;
+			tileScores[weakest] = score;
+		}
+	}
+
+	/**
+	 * Whether a light on the given side of the walls can reach any part of a tile, judged from the tile and its
+	 * neighbours since walls and floors near a tile edge take their light from the tile next door.
+	 */
+	private boolean reaches(int building, int x, int y)
+	{
+		if (building == 0 || buildings == null)
+		{
+			return true;
+		}
+		for (int nx = Math.max(0, x - 1); nx <= Math.min(buildings.width - 1, x + 1); nx++)
+		{
+			for (int ny = Math.max(0, y - 1); ny <= Math.min(buildings.height - 1, y + 1); ny++)
+			{
+				int b = buildings.building[nx][ny];
+				if (building == OUTSIDE)
+				{
+					// outside of any building, or the outside half of an angled corner
+					if (b <= 0 || b > MASK_MAX_BUILDING || buildings.corner[nx][ny] != BuildingMap.CORNER_NONE)
+					{
+						return true;
+					}
+				}
+				else if (b == building || (buildings.spill[nx][ny] & BuildingMap.SPILL_ID_MASK) == building)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -414,17 +575,6 @@ public class LightManager
 		}
 		int b = buildings.building[tx][ty];
 		return b == 0 || b > MASK_MAX_BUILDING ? OUTSIDE : b;
-	}
-
-	private void addCandidate(Light light, float px, float pz)
-	{
-		float dx = light.x - px;
-		float dz = light.z - pz;
-		light.distance = dx * dx + dz * dz;
-		if (light.distance < (float) MAX_DISTANCE * MAX_DISTANCE)
-		{
-			candidates.add(light);
-		}
 	}
 
 	private void scanScene()
@@ -473,6 +623,7 @@ public class LightManager
 	{
 		buildings = null;
 		buildingLights.clear();
+		lightsDirty = true;
 		buildingPlane = wv.getPlane();
 		maskChanged = true;
 		maskWidth = 1;
@@ -626,6 +777,7 @@ public class LightManager
 			oldLevels.put(light.key, light.level);
 		}
 		buildingLights.clear();
+		lightsDirty = true;
 		if (!interiorEnabled)
 		{
 			return;

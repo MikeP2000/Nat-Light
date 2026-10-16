@@ -39,11 +39,18 @@ uniform vec3 lightColor;
 uniform vec3 ambientColor;
 uniform int useLighting;
 
-#define MAX_POINT_LIGHTS 32
+// moving lights (the player's spells), which every pixel checks
+#define MAX_POINT_LIGHTS 8
 uniform int pointLightCount;
 uniform vec4 pointLightPos[MAX_POINT_LIGHTS];    // xyz position, w radius
 uniform vec4 pointLightColor[MAX_POINT_LIGHTS];  // rgb color times brightness
-uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is confined to, 0 for none
+uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is confined to, -1 outdoors, 0 for none
+// lights that stay put, one per column: row 0 = xyz position and radius, row 1 = rgb color times brightness and
+// the building it's confined to (as pointLightBuilding)
+uniform sampler2D lightData;
+// per tile, the lights (index + 1, 0 for none) from lightData that reach it, in two RGBA texels
+#define GRID_SLOTS 8
+uniform usampler2D lightGrid;
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
 // doorway (low 14 bits) and how strongly (top 2 bits, 1-2)
 uniform usampler2D buildingMap;
@@ -115,6 +122,54 @@ float lightShare(uvec2 v, ivec2 tile, vec2 pos, int building) {
   return 0.0;
 }
 
+// The surface being lit, shared by the per-light function below
+vec3 sNormal;
+float sFloorness;
+vec2 sWallPos;
+ivec2 sWallTile;
+vec2 sHere;
+ivec2 sHereTile;
+ivec2 sFloorTile;
+vec2 sFloorFrac;
+uvec2 sWallV;
+uvec2 sHereV;
+uvec2 sFloorV00;
+uvec2 sFloorV10;
+uvec2 sFloorV01;
+uvec2 sFloorV11;
+
+// One point light's contribution to the surface
+vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
+  float share = 1.0;
+  if (building != 0) {
+    float wallShare = lightShare(sWallV, sWallTile, sWallPos, building);
+    float floorShare = mix(
+      mix(lightShare(sFloorV00, sFloorTile, sHere, building), lightShare(sFloorV10, sFloorTile + ivec2(1, 0), sHere, building), sFloorFrac.x),
+      mix(lightShare(sFloorV01, sFloorTile + ivec2(0, 1), sHere, building), lightShare(sFloorV11, sFloorTile + ivec2(1, 1), sHere, building), sFloorFrac.x),
+      sFloorFrac.y);
+    // only blend on floors that get some of the light themselves, so it never creeps out past the walls
+    float own = lightShare(sHereV, sHereTile, sHere, building);
+    floorShare = own <= 0.0 ? 0.0 : min(floorShare, own);
+    share = mix(wallShare, floorShare, sFloorness);
+    if (share <= 0.0) {
+      return vec3(0.0);
+    }
+  }
+  vec3 toLight = posRadius.xyz - fWorldPos;
+  float dist = length(toLight);
+  float radius = posRadius.w;
+  if (dist >= radius) {
+    return vec3(0.0);
+  }
+  float falloff = 1.0 - (dist * dist) / (radius * radius);
+  falloff *= falloff;
+  // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
+  // back of a wall stays dark.
+  float facing = max(dot(sNormal, toLight / max(dist, 1.0)), 0.0);
+  facing = mix(facing, facing * 0.75 + 0.25, sFloorness);
+  return lightColor * falloff * facing * share;
+}
+
 // Shades the game's own (already lit) colors with the sun or moon and the ambient light.
 // Vertices carry no normals, so the face normal comes from the screen space derivatives
 // of the world position, flipped to face the camera.
@@ -131,59 +186,50 @@ vec3 applyLighting(vec3 color) {
   // counts as outside and blocks the light. Floors blend the four nearest tiles, so the light fades across tile
   // edges instead of stopping in hard squares.
   ivec2 mapSize = textureSize(buildingMap, 0);
-  vec2 wallPos = (fWorldPos.xz + normal.xz * 24.0) / 128.0;
-  ivec2 wallTile = ivec2(floor(wallPos));
-  vec2 here = fWorldPos.xz / 128.0;
-  ivec2 hereTile = ivec2(floor(here));
-  vec2 floorPos = here - 0.5;
-  ivec2 floorTile = ivec2(floor(floorPos));
-  vec2 floorFrac = fract(floorPos);
-  float floorness = smoothstep(0.5, 0.9, abs(normal.y));
-  uvec2 wallV = buildingTile(wallTile, mapSize);
-  uvec2 hereV = buildingTile(hereTile, mapSize);
-  uvec2 floorV00 = buildingTile(floorTile, mapSize);
-  uvec2 floorV10 = buildingTile(floorTile + ivec2(1, 0), mapSize);
-  uvec2 floorV01 = buildingTile(floorTile + ivec2(0, 1), mapSize);
-  uvec2 floorV11 = buildingTile(floorTile + ivec2(1, 1), mapSize);
+  sNormal = normal;
+  sFloorness = smoothstep(0.5, 0.9, abs(normal.y));
+  sWallPos = (fWorldPos.xz + normal.xz * 24.0) / 128.0;
+  sWallTile = ivec2(floor(sWallPos));
+  sHere = fWorldPos.xz / 128.0;
+  sHereTile = ivec2(floor(sHere));
+  vec2 floorPos = sHere - 0.5;
+  sFloorTile = ivec2(floor(floorPos));
+  sFloorFrac = fract(floorPos);
+  sWallV = buildingTile(sWallTile, mapSize);
+  sHereV = buildingTile(sHereTile, mapSize);
+  sFloorV00 = buildingTile(sFloorTile, mapSize);
+  sFloorV10 = buildingTile(sFloorTile + ivec2(1, 0), mapSize);
+  sFloorV01 = buildingTile(sFloorTile + ivec2(0, 1), mapSize);
+  sFloorV11 = buildingTile(sFloorTile + ivec2(1, 1), mapSize);
 
-  for (int i = 0; i < pointLightCount; i++) {
-    int building = pointLightBuilding[i];
-    bool confined = building != 0;
-    float share = 1.0;
-    if (confined) {
-      float wallShare = lightShare(wallV, wallTile, wallPos, building);
-      float floorShare = mix(
-        mix(lightShare(floorV00, floorTile, here, building), lightShare(floorV10, floorTile + ivec2(1, 0), here, building), floorFrac.x),
-        mix(lightShare(floorV01, floorTile + ivec2(0, 1), here, building), lightShare(floorV11, floorTile + ivec2(1, 1), here, building), floorFrac.x),
-        floorFrac.y);
-      // only blend on floors that get some of the light themselves, so it never creeps out past the walls
-      float own = lightShare(hereV, hereTile, here, building);
-      floorShare = own <= 0.0 ? 0.0 : min(floorShare, own);
-      share = mix(wallShare, floorShare, floorness);
-      if (share <= 0.0) {
-        continue;
+  // lights that stay put: only the few the light grid lists for this tile
+  ivec2 gridSize = textureSize(lightGrid, 0);
+  if (all(greaterThanEqual(sHereTile, ivec2(0))) && sHereTile.x * 2 + 1 < gridSize.x && sHereTile.y < gridSize.y) {
+    uvec4 slots[2];
+    slots[0] = texelFetch(lightGrid, ivec2(sHereTile.x * 2, sHereTile.y), 0);
+    slots[1] = texelFetch(lightGrid, ivec2(sHereTile.x * 2 + 1, sHereTile.y), 0);
+    for (int k = 0; k < GRID_SLOTS; k++) {
+      uint index = slots[k >> 2][k & 3];
+      if (index == 0u) {
+        break;
       }
+      int i = int(index) - 1;
+      vec4 posRadius = texelFetch(lightData, ivec2(i, 0), 0);
+      vec4 colorBuilding = texelFetch(lightData, ivec2(i, 1), 0);
+      light += pointLight(posRadius, colorBuilding.rgb, int(colorBuilding.a));
     }
-    vec3 toLight = pointLightPos[i].xyz - fWorldPos;
-    float dist = length(toLight);
-    float radius = pointLightPos[i].w;
-    if (dist >= radius) {
-      continue;
-    }
-    float falloff = 1.0 - (dist * dist) / (radius * radius);
-    falloff *= falloff;
-    // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
-    // back of a wall stays dark.
-    float facing = max(dot(normal, toLight / max(dist, 1.0)), 0.0);
-    facing = mix(facing, facing * 0.75 + 0.25, floorness);
-    light += pointLightColor[i].rgb * falloff * facing * share;
+  }
+
+  // moving lights
+  for (int i = 0; i < pointLightCount; i++) {
+    light += pointLight(pointLightPos[i], pointLightColor[i].rgb, pointLightBuilding[i]);
   }
 
   return color * min(light, vec3(2.0));
 }
 
 // Debug view of the building map: lit buildings green, buildings with no NPC red, light spilling out of windows and
-// doorways blue, and a white dot under each building light.
+// doorways blue, and a white dot under each light.
 vec3 buildingDebug(vec3 color) {
   ivec2 mapSize = textureSize(buildingMap, 0);
   vec2 here = fWorldPos.xz / 128.0;
@@ -209,9 +255,17 @@ vec3 buildingDebug(vec3 color) {
     tint = vec3(0.2, 0.4, 1.0);
     amount = 0.25 * float(v.g >> 14);
   }
-  for (int i = 0; i < pointLightCount; i++) {
-    if (pointLightBuilding[i] != 0 && distance(pointLightPos[i].xz, fWorldPos.xz) < 20.0) {
-      return vec3(1.0);
+  ivec2 gridSize = textureSize(lightGrid, 0);
+  if (tile.x * 2 + 1 < gridSize.x && tile.y < gridSize.y) {
+    for (int k = 0; k < GRID_SLOTS; k++) {
+      uint index = texelFetch(lightGrid, ivec2(tile.x * 2 + (k >> 2), tile.y), 0)[k & 3];
+      if (index == 0u) {
+        break;
+      }
+      vec4 posRadius = texelFetch(lightData, ivec2(int(index) - 1, 0), 0);
+      if (distance(posRadius.xz, fWorldPos.xz) < 20.0) {
+        return vec3(1.0);
+      }
     }
   }
   return mix(color, tint, amount);
