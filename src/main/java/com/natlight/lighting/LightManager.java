@@ -735,7 +735,11 @@ public class LightManager
 						return true;
 					}
 				}
-				else if (b == building || (buildings.spill[nx][ny] & BuildingMap.SPILL_ID_MASK) == building)
+				// a light in a building reaches its own tiles, where it spills out, and the tiles just past the spill so
+				// it fades out smoothly. Not tiles that only touch the building's walls from outside, or light gets
+				// round the outside of the building once a door is open.
+				else if ((buildings.spill[nx][ny] & BuildingMap.SPILL_ID_MASK) == building
+					|| (nx == x && ny == y && b == building))
 				{
 					return true;
 				}
