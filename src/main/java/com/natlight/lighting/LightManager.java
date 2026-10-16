@@ -88,6 +88,7 @@ public class LightManager
 		.put("oven", LightType.FURNACE)
 		.put("forge", LightType.FURNACE)
 		.put("lava", LightType.LAVA)
+		.put("stall", LightType.STALL)
 		.build();
 
 	// Words that mean the name isn't actually a light, e.g. "Fire altar" or "Fire obelisk"
@@ -117,6 +118,10 @@ public class LightManager
 		/** Building the light is confined to, {@link #OUTSIDE} for outdoors, 0 for not confined. */
 		int building;
 		float distance;
+		/** Fades from 0 to 1 when the light first appears, so lights ease in instead of popping. */
+		float level;
+		/** Identifies the light across area reloads, from its type and world position. */
+		long key;
 
 		Light(LightType type, float x, float y, float z, int plane, boolean fixedBuilding)
 		{
@@ -147,6 +152,10 @@ public class LightManager
 	private final List<Light> buildingLights = new ArrayList<>();
 	// lit buildings stay lit when the area reloads, keyed by the world position of their first tile
 	private final Set<Long> rememberedLit = new HashSet<>();
+	private boolean rememberedChanged;
+	// fade levels of the lights from before the area reloaded, so lights that are still there don't fade in again
+	private final Map<Long, Float> previousLevels = new HashMap<>();
+	private int lastCycle = -1;
 	private final Map<Integer, Integer> edgeCache = new HashMap<>();
 	private static final int EDGE_NONE = 0;
 	private static final int EDGE_DOOR = 1;
@@ -170,6 +179,10 @@ public class LightManager
 	private static final int MASK_LIT = 0x1000;
 	/** Light building value for a light that is outdoors and must not shine into buildings. */
 	private static final int OUTSIDE = -1;
+	/** Client cycles a new light takes to fade in. */
+	private static final int FADE_CYCLES = 60;
+	/** Distance in local units over which lights fade out before the nearest-lights cut off. */
+	private static final float CUTOFF_FADE = 3 * Perspective.LOCAL_TILE_SIZE;
 	public int maskWidth = 1;
 	public int maskHeight = 1;
 	public boolean maskChanged = true;
@@ -182,6 +195,15 @@ public class LightManager
 	/** Forgets every light, e.g. when a new scene loads. Spawn events refill it. */
 	public void clear()
 	{
+		previousLevels.clear();
+		for (Light light : objectLights.values())
+		{
+			previousLevels.put(light.key, light.level);
+		}
+		for (Light light : buildingLights)
+		{
+			previousLevels.put(light.key, light.level);
+		}
 		objectLights.clear();
 		buildingsDirty = true;
 	}
@@ -249,7 +271,15 @@ public class LightManager
 			x += decoration.getXOffset();
 			z += decoration.getYOffset();
 		}
-		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
+		Light light = new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false);
+		WorldView wv = object.getWorldView();
+		keyLight(light, wv.getBaseX(), wv.getBaseY());
+		Float level = previousLevels.get(light.key);
+		if (level != null)
+		{
+			light.level = level;
+		}
+		objectLights.put(object.getHash(), light);
 	}
 
 	public void objectDespawned(TileObject object)
@@ -287,6 +317,19 @@ public class LightManager
 			rebuildBuildings(wv);
 		}
 
+		// ease new lights in over a second or so, measured in client cycles (20ms each)
+		int cycle = client.getGameCycle();
+		float step = lastCycle < 0 ? 0f : Math.max(0, Math.min(cycle - lastCycle, 50)) / (float) FADE_CYCLES;
+		lastCycle = cycle;
+		for (Light light : objectLights.values())
+		{
+			light.level = Math.min(1f, light.level + step);
+		}
+		for (Light light : buildingLights)
+		{
+			light.level = Math.min(1f, light.level + step);
+		}
+
 		count = 0;
 		Player player = client.getLocalPlayer();
 		if (player == null || brightness <= 0f)
@@ -310,8 +353,10 @@ public class LightManager
 		{
 			if (projectile.getSourceActor() == player && FIRE_SPELL_PROJECTILES.contains(projectile.getId()))
 			{
-				addCandidate(new Light(LightType.FIRE_SPELL, (float) projectile.getX(), (float) projectile.getZ(),
-					(float) projectile.getY(), client.getTopLevelWorldView().getPlane(), false), px, pz);
+				Light light = new Light(LightType.FIRE_SPELL, (float) projectile.getX(), (float) projectile.getZ(),
+					(float) projectile.getY(), client.getTopLevelWorldView().getPlane(), false);
+				light.level = 1f;
+				addCandidate(light, px, pz);
 			}
 		}
 
@@ -319,13 +364,17 @@ public class LightManager
 
 		float time = client.getGameCycle() / 50f * 2f * (float) Math.PI;
 		int n = Math.min(MAX_LIGHTS, candidates.size());
+		// when there are more lights than fit, dim the farthest ones as they near the cut off, so they fade out as
+		// the player walks away instead of switching off
+		float cutoff = candidates.size() > MAX_LIGHTS ? (float) Math.sqrt(candidates.get(MAX_LIGHTS).distance) : Float.MAX_VALUE;
 		for (int i = 0; i < n; i++)
 		{
 			Light light = candidates.get(i);
 			LightType type = light.type;
 			// two out-of-step waves make the flicker look less mechanical
 			float wobble = (float) (Math.sin(time * 1.3f + light.phase) * 0.6 + Math.sin(time * 3.1f + light.phase * 2f) * 0.4);
-			float level = type.strength * brightness * (1f + type.flicker * wobble);
+			float edge = Math.min(1f, Math.max(0f, (cutoff - (float) Math.sqrt(light.distance)) / CUTOFF_FADE));
+			float level = type.strength * brightness * (1f + type.flicker * wobble) * light.level * edge * edge * (3f - 2f * edge);
 
 			int o = i * 4;
 			positions[o] = light.x;
@@ -565,6 +614,11 @@ public class LightManager
 	/** Puts ceiling lights in each lit building, spread over the cells it covers. */
 	private void placeBuildingLights(WorldView wv)
 	{
+		Map<Long, Float> oldLevels = new HashMap<>(previousLevels);
+		for (Light light : buildingLights)
+		{
+			oldLevels.put(light.key, light.level);
+		}
 		buildingLights.clear();
 		if (!interiorEnabled)
 		{
@@ -620,6 +674,12 @@ public class LightManager
 				int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
 				Light light = new Light(LightType.INTERIOR, x, y, z, plane, true);
 				light.building = b + 1;
+				keyLight(light, buildingBaseX, buildingBaseY);
+				Float level = oldLevels.get(light.key);
+				if (level != null)
+				{
+					light.level = level;
+				}
 				buildingLights.add(light);
 			}
 		}
@@ -656,11 +716,62 @@ public class LightManager
 	{
 		for (int b = 0; b < buildings.buildingCount(); b++)
 		{
-			if (buildings.lit.get(b))
+			if (buildings.lit.get(b) && rememberedLit.add(buildingKey(b)))
 			{
-				rememberedLit.add(buildingKey(b));
+				rememberedChanged = true;
 			}
 		}
+	}
+
+	private static void keyLight(Light light, int baseX, int baseY)
+	{
+		// quarter-tile world position, plus type and plane
+		long wx = baseX * 4L + (long) Math.floor(light.x / 32f);
+		long wy = baseY * 4L + (long) Math.floor(light.z / 32f);
+		light.key = (long) light.type.ordinal() << 52 | (long) light.plane << 48 | (wx & 0xFFFFFF) << 24 | (wy & 0xFFFFFF);
+	}
+
+	/** Whether the set of remembered lit buildings changed since the last {@link #saveLit()}. */
+	public boolean litChanged()
+	{
+		return rememberedChanged;
+	}
+
+	/** The remembered lit buildings, as a compact string for saving between sessions. */
+	public String saveLit()
+	{
+		rememberedChanged = false;
+		StringBuilder sb = new StringBuilder();
+		for (long key : rememberedLit)
+		{
+			if (sb.length() > 0)
+			{
+				sb.append(',');
+			}
+			sb.append(Long.toString(key, 36));
+		}
+		return sb.toString();
+	}
+
+	/** Restores lit buildings saved by {@link #saveLit()}. */
+	public void loadLit(String saved)
+	{
+		if (saved == null || saved.isEmpty())
+		{
+			return;
+		}
+		for (String part : saved.split(","))
+		{
+			try
+			{
+				rememberedLit.add(Long.parseLong(part, 36));
+			}
+			catch (NumberFormatException e)
+			{
+				// skip anything that isn't a key
+			}
+		}
+		buildingsDirty = true;
 	}
 
 	private long buildingKey(int b)
