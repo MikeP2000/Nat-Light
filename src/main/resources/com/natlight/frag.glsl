@@ -130,6 +130,7 @@ float lightShare(uvec2 v, ivec2 tile, vec2 pos, int building) {
 }
 
 #define LIGHT_FLOOR_BELOW 270.0
+#define LIGHT_ROOF_ABOVE 40.0
 
 // The surface being lit, shared by the per-light function below
 vec3 sNormal;
@@ -169,9 +170,10 @@ vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
   }
   float falloff = 1.0 - (dist * dist) / (radius * radius);
   falloff *= falloff;
-  // a light only lights its own floor, not the floor below it or the ground outside far beneath it (y is down;
-  // lights hang up to about 260 above their floor, and floors are 240 apart)
-  falloff *= 1.0 - smoothstep(LIGHT_FLOOR_BELOW, LIGHT_FLOOR_BELOW + 70.0, fWorldPos.y - posRadius.y);
+  // a light only lights its own floor: not the floor below it or the ground outside far beneath it, and not the
+  // floor above it (y is down; lights hang up to about 200 above their floor, and floors are 240 apart)
+  float below = fWorldPos.y - posRadius.y;
+  falloff *= (1.0 - smoothstep(LIGHT_FLOOR_BELOW, LIGHT_FLOOR_BELOW + 70.0, below)) * (1.0 - smoothstep(LIGHT_ROOF_ABOVE, LIGHT_ROOF_ABOVE + 40.0, -below));
   // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
   // back of a wall stays dark.
   float facing = max(dot(sNormal, toLight / max(dist, 1.0)), 0.0);
@@ -297,7 +299,7 @@ vec3 buildingDebug(vec3 color) {
         break;
       }
       vec4 posRadius = texelFetch(lightData, ivec2(int(index) - 1, 0), 0);
-      if (distance(posRadius.xz, fWorldPos.xz) < 20.0) {
+      if (distance(posRadius.xz, fWorldPos.xz) < 20.0 && abs(fWorldPos.y - posRadius.y) < LIGHT_FLOOR_BELOW) {
         // ceiling lights yellow, everything else white
         return int(texelFetch(lightData, ivec2(int(index) - 1, 1), 0).a) >= CEILING_FLAG ? vec3(1.0, 0.85, 0.0) : vec3(1.0);
       }

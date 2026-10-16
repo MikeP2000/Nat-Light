@@ -49,7 +49,7 @@ public enum LightType
 	// a street lamp around the Grand Exchange
 	PLAZA(1.00f, 0.80f, 0.50f, 7f, 0.8f, 240, 0.02f),
 	// a soft ceiling light for buildings that have people in them but no light source of their own
-	INTERIOR(1.00f, 0.80f, 0.55f, 6f, 0.7f, 260, 0.02f);
+	INTERIOR(1.00f, 0.80f, 0.55f, 6f, 0.7f, 170, 0.02f);
 
 	final float r;
 	final float g;
