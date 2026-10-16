@@ -116,6 +116,8 @@ final class LightObjects
 		ObjectID.PENG_ARDOUGNE_TORCH,
 		ObjectID.SLICE_CAVEWALL_FACE_TORCH,
 		ObjectID.SLICE_STEALTH_TORCH,
+		ObjectID.FAI_FALADOR_HOUSE_TORCH,
+		ObjectID.FAI_FALADOR_TORCH,
 		ObjectID.HELLHOUND_LAIR_TORCH,
 		ObjectID.DS2_GUILD_WALL_SCONCE,
 		ObjectID.DS2_LITHKREN_DUNGEON_TORCH_SMALL,
@@ -939,14 +941,8 @@ final class LightObjects
 		ObjectID.CASTLE_DRAKAN_LOWERNIEL_CANDLESTICK,
 	};
 
-	/** Small torches on a wall plaque, which give less light than a full torch. */
-	private static final int[] SCONCES = {
-		ObjectID.FAI_FALADOR_HOUSE_TORCH,
-		ObjectID.FAI_FALADOR_TORCH,
-	};
-
 	static final Map<Integer, LightType> BY_ID;
-	/** Lights picked by hand, looked up before the name, since their names don't say what kind of light they are. */
+	/** Named objects that are lights though their names don't say so, looked up before the name. */
 	static final Map<Integer, LightType> NAMED_BY_ID;
 
 	static
@@ -961,7 +957,6 @@ final class LightObjects
 
 		Map<Integer, LightType> named = new HashMap<>();
 		put(named, CANDLE_FURNITURE, LightType.CANDLE);
-		put(named, SCONCES, LightType.SCONCE);
 		NAMED_BY_ID = Collections.unmodifiableMap(named);
 	}
 

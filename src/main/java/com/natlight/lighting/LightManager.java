@@ -686,7 +686,6 @@ public class LightManager
 			case LAMP:
 			case CANDLE:
 			case TORCH:
-			case SCONCE:
 			case BOOTH:
 			case EXCHANGE_BOOTH:
 				return true;
@@ -1328,16 +1327,16 @@ public class LightManager
 
 	private static LightType classify(ObjectComposition def)
 	{
-		LightType picked = LightObjects.NAMED_BY_ID.get(def.getId());
-		if (picked != null)
-		{
-			return picked;
-		}
 		String name = def.getName();
 		if (name == null || name.equals("null"))
 		{
 			// scenery you can't interact with, like many wall torches, has no name, so it's looked up by id
 			return LightObjects.BY_ID.get(def.getId());
+		}
+		LightType furniture = LightObjects.NAMED_BY_ID.get(def.getId());
+		if (furniture != null)
+		{
+			return furniture;
 		}
 		// unlit torches and candles offer "Light"
 		String[] actions = def.getActions();
