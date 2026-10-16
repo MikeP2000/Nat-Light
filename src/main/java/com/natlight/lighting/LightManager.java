@@ -763,36 +763,96 @@ public class LightManager
 	/**
 	 * Picks which side of its wall a wall light hangs on. Its model usually says, but lamps and torches on a
 	 * building's wall are nearly always hung inside, so when only the other side is in a building it moves there.
+	 * On an angled wall the other side is across the tile's corner rather than an edge.
 	 */
 	private void pickWallSide(Light light)
 	{
 		light.x = light.hungX;
 		light.z = light.hungZ;
 		BuildingMap floor = floorOf(light);
-		if (floor == null || buildingAt(floor, light.x, light.z) > 0)
+		if (floor == null || insideBuilding(floor, light.x, light.z))
 		{
 			return;
 		}
-		// the other side: mirror the light across the nearest edge of the tile it sits on
+		// the other side: mirror the light across the nearest edge of the tile it sits on, then the other edge, then
+		// both, or across the angled wall when it's on the outside half of a corner tile
 		float tile = Perspective.LOCAL_TILE_SIZE;
 		float fx = light.x - (float) Math.floor(light.x / tile) * tile;
 		float fz = light.z - (float) Math.floor(light.z / tile) * tile;
-		float mx = light.x;
-		float mz = light.z;
-		float edgeX = Math.min(fx, tile - fx);
-		float edgeZ = Math.min(fz, tile - fz);
-		if (edgeX < edgeZ)
+		float mx = fx < tile / 2 ? light.x - 2 * fx - 1 : light.x + 2 * (tile - fx) + 1;
+		float mz = fz < tile / 2 ? light.z - 2 * fz - 1 : light.z + 2 * (tile - fz) + 1;
+		boolean xFirst = Math.min(fx, tile - fx) < Math.min(fz, tile - fz);
+		float[][] candidates = {
+			{light.x, light.z},
+			xFirst ? new float[]{mx, light.z} : new float[]{light.x, mz},
+			xFirst ? new float[]{light.x, mz} : new float[]{mx, light.z},
+			{mx, mz},
+		};
+		for (float[] c : candidates)
 		{
-			mx = fx < tile / 2 ? light.x - 2 * fx - 1 : light.x + 2 * (tile - fx) + 1;
+			if (!insideBuilding(floor, c[0], c[1]))
+			{
+				c = acrossCorner(floor, c[0], c[1]);
+			}
+			if (c != null && insideBuilding(floor, c[0], c[1]))
+			{
+				light.x = c[0];
+				light.z = c[1];
+				return;
+			}
 		}
-		else
+	}
+
+	/** A point on the outside half of an angled-corner tile, mirrored across the angled wall; null if not on one. */
+	private static float[] acrossCorner(BuildingMap buildings, float x, float z)
+	{
+		if (buildingAt(buildings, x, z) <= 0)
 		{
-			mz = fz < tile / 2 ? light.z - 2 * fz - 1 : light.z + 2 * (tile - fz) + 1;
+			return null;
 		}
-		if (buildingAt(floor, mx, mz) > 0)
+		float tile = Perspective.LOCAL_TILE_SIZE;
+		float tx = (float) Math.floor(x / tile) * tile;
+		float tz = (float) Math.floor(z / tile) * tile;
+		float fx = x - tx;
+		float fz = z - tz;
+		switch (buildings.corner[(int) (tx / tile)][(int) (tz / tile)])
 		{
-			light.x = mx;
-			light.z = mz;
+			case BuildingMap.CORNER_NE:
+			case BuildingMap.CORNER_SW:
+				// the wall runs from the north-west corner to the south-east one
+				return new float[]{tx + tile - fz, tz + tile - fx};
+			case BuildingMap.CORNER_NW:
+			case BuildingMap.CORNER_SE:
+				return new float[]{tx + fz, tz + fx};
+			default:
+				return null;
+		}
+	}
+
+	/** Whether a point is inside a building, on the inside half of an angled-corner tile. */
+	private static boolean insideBuilding(BuildingMap buildings, float x, float z)
+	{
+		if (buildingAt(buildings, x, z) <= 0)
+		{
+			return false;
+		}
+		float tile = Perspective.LOCAL_TILE_SIZE;
+		int tx = (int) Math.floor(x / tile);
+		int ty = (int) Math.floor(z / tile);
+		float fx = x / tile - tx;
+		float fy = z / tile - ty;
+		switch (buildings.corner[tx][ty])
+		{
+			case BuildingMap.CORNER_NE:
+				return fx + fy > 1;
+			case BuildingMap.CORNER_NW:
+				return fy > fx;
+			case BuildingMap.CORNER_SE:
+				return fx > fy;
+			case BuildingMap.CORNER_SW:
+				return fx + fy < 1;
+			default:
+				return true;
 		}
 	}
 
