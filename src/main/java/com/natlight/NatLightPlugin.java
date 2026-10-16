@@ -1193,8 +1193,8 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		if (lightManager.maskChanged)
 		{
 			lightManager.maskChanged = false;
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16UI, lightManager.maskWidth, lightManager.maskHeight, 0,
-				GL_RG_INTEGER, GL_UNSIGNED_SHORT, lightManager.buildingMask);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16UI, lightManager.maskWidth, lightManager.maskHeight, 0,
+				GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, lightManager.buildingMask);
 		}
 		glUniform1i(uniBuildingMap, 2);
 

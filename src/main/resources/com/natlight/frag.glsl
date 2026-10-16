@@ -55,9 +55,11 @@ uniform usampler2D lightGrid;
 // the lights of a room (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several
 // lights aren't brighter than rooms with one
 #define INTERIOR_FLAG 8192
+// marks ceiling lights, for the debug view
+#define CEILING_FLAG 16384
 uniform float interiorLimit;
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
-// doorway (low 14 bits) and how strongly (top 2 bits, 1-2)
+// doorway (low 14 bits) and how strongly (top 2 bits, 1-2), b = why a roofed tile isn't a building (debug view)
 uniform usampler2D buildingMap;
 uniform int debugBuildings;
 
@@ -223,6 +225,9 @@ vec3 applyLighting(vec3 color) {
       vec4 posRadius = texelFetch(lightData, ivec2(i, 0), 0);
       vec4 colorBuilding = texelFetch(lightData, ivec2(i, 1), 0);
       int code = int(colorBuilding.a);
+      if (code >= CEILING_FLAG) {
+        code -= CEILING_FLAG;
+      }
       if (code >= INTERIOR_FLAG) {
         interior += pointLight(posRadius, colorBuilding.rgb, code - INTERIOR_FLAG);
       } else {
@@ -230,9 +235,10 @@ vec3 applyLighting(vec3 color) {
       }
     }
   }
+  // ease the room's lights towards the limit, so they light it evenly without stacking up or flattening out
   float interiorPeak = max(interior.r, max(interior.g, interior.b));
-  if (interiorPeak > interiorLimit) {
-    interior *= interiorLimit / interiorPeak;
+  if (interiorPeak > 0.0 && interiorLimit > 0.0) {
+    interior *= interiorLimit * (1.0 - exp(-interiorPeak / interiorLimit)) / interiorPeak;
   }
   light += interior;
 
@@ -247,7 +253,8 @@ vec3 applyLighting(vec3 color) {
 }
 
 // Debug view of the building map: lit buildings green, buildings with no NPC red, light spilling out of windows and
-// doorways blue, and a white dot under each light.
+// doorways blue, roofed areas too small (grey) or too open (orange) to be a building, and a dot under each light
+// (yellow for ceiling lights, white for the rest).
 vec3 buildingDebug(vec3 color) {
   ivec2 mapSize = textureSize(buildingMap, 0);
   vec2 here = fWorldPos.xz / 128.0;
@@ -255,7 +262,7 @@ vec3 buildingDebug(vec3 color) {
   if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, mapSize))) {
     return color;
   }
-  uvec2 v = texelFetch(buildingMap, tile, 0).rg;
+  uvec4 v = texelFetch(buildingMap, tile, 0);
   uint building = v.r & 0x0FFFu;
   vec3 tint = vec3(0.0);
   float amount = 0.0;
@@ -272,6 +279,10 @@ vec3 buildingDebug(vec3 color) {
   if (amount < 0.3 && (v.g & 0x3FFFu) != 0u) {
     tint = vec3(0.2, 0.4, 1.0);
     amount = 0.25 * float(v.g >> 14);
+  } else if (building == 0u && v.b != 0u) {
+    // roofed but not a building: grey if too small, orange if too open
+    tint = v.b == 2u ? vec3(0.6) : vec3(1.0, 0.55, 0.0);
+    amount = 0.45;
   }
   ivec2 gridSize = textureSize(lightGrid, 0);
   if ((tile.x + 1) * GRID_TEXELS <= gridSize.x && tile.y < gridSize.y) {
@@ -282,7 +293,8 @@ vec3 buildingDebug(vec3 color) {
       }
       vec4 posRadius = texelFetch(lightData, ivec2(int(index) - 1, 0), 0);
       if (distance(posRadius.xz, fWorldPos.xz) < 20.0) {
-        return vec3(1.0);
+        // ceiling lights yellow, everything else white
+        return int(texelFetch(lightData, ivec2(int(index) - 1, 1), 0).a) >= CEILING_FLAG ? vec3(1.0, 0.85, 0.0) : vec3(1.0);
       }
     }
   }

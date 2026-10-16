@@ -35,7 +35,6 @@ import java.util.Map;
 import java.util.Set;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
-import net.runelite.api.CollisionDataFlag;
 import net.runelite.api.Constants;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
@@ -205,10 +204,12 @@ public class LightManager
 	public boolean gridChanged = true;
 
 	/**
-	 * Building id (with angled-corner half) and spill of each tile on the player's plane, two shorts per tile in
+	 * Building id (with angled-corner half), spill and debug info of each tile on the player's plane, four shorts per tile in
 	 * row-major order (y rows of x), for the shader to keep building lights inside their walls.
 	 */
-	public short[] buildingMask = new short[2];
+	public short[] buildingMask = new short[MASK_SHORTS];
+	/** Shorts per tile in {@link #buildingMask}: building, spill, why it isn't a building, unused. */
+	public static final int MASK_SHORTS = 4;
 	/** Building ids above this don't fit in the mask, so those buildings get no light. */
 	private static final int MASK_MAX_BUILDING = 0x0FFF;
 	private static final int MASK_LIT = 0x1000;
@@ -217,7 +218,13 @@ public class LightManager
 	/** Added to a ceiling light's building in the light data, so the shader can even out overlapping ones. */
 	private static final int INTERIOR_FLAG = 8192;
 	/** The most the lights of a room add up to, before the overall brightness. */
-	private static final float ROOM_LIGHT_LIMIT = 0.75f;
+	private static final float ROOM_LIGHT_LIMIT = 0.55f;
+	/** Buildings at least this big (castles, halls, churches) are always lit. */
+	private static final int LARGE_BUILDING_TILES = 60;
+	/** A building with at least this many candles counts as lit by them. */
+	private static final int SELF_LIT_CANDLES = 2;
+	/** Added to a ceiling light's building in the light data, so the debug view can tell it apart. */
+	private static final int CEILING_FLAG = 16384;
 	/** How far below the top of a wall light's model its light sits, in local units (up is negative). */
 	private static final int WALL_LIGHT_BELOW_TOP = 12;
 	private static final int PLAZA_MIN_BOOTHS = 4;
@@ -531,7 +538,8 @@ public class LightManager
 			lightData[o + 1] = light.y;
 			lightData[o + 2] = light.z;
 			lightData[o + 3] = radius;
-			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0);
+			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0)
+				+ (light.type == LightType.INTERIOR ? CEILING_FLAG : 0);
 
 			// spread out from the light's tile to tiles whose middle is within the radius plus a tile's half-diagonal
 			// and a bit, without crossing walls, so light from a campfire in a roofless hut stays inside the hut
@@ -854,7 +862,7 @@ public class LightManager
 		maskChanged = true;
 		maskWidth = 1;
 		maskHeight = 1;
-		buildingMask = new short[2];
+		buildingMask = new short[MASK_SHORTS];
 
 		CollisionData[] maps = wv.getCollisionMaps();
 		int plane = buildingPlane;
@@ -881,8 +889,7 @@ public class LightManager
 			for (int y = 0; y < h; y++)
 			{
 				f[x][y] = flags[x][y];
-				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0
-					&& !isOpenFloor(tiles, settings, maps, plane + 1, x, y);
+				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0;
 				Tile tile = tiles[plane][x][y];
 				if (tile == null)
 				{
@@ -911,7 +918,8 @@ public class LightManager
 		buildingBaseY = wv.getBaseY();
 		for (int b = 0; b < buildings.buildingCount(); b++)
 		{
-			if (rememberedLit.contains(buildingKey(b)))
+			// big buildings like castles, halls and churches are kept lit whether or not an NPC can reach them
+			if (rememberedLit.contains(buildingKey(b)) || buildings.buildingTiles.get(b).length >= LARGE_BUILDING_TILES)
 			{
 				buildings.lit.set(b, true);
 			}
@@ -929,7 +937,7 @@ public class LightManager
 
 		maskWidth = w;
 		maskHeight = h;
-		buildingMask = new short[w * h * 2];
+		buildingMask = new short[w * h * MASK_SHORTS];
 		writeMask();
 	}
 
@@ -940,7 +948,7 @@ public class LightManager
 		{
 			for (int x = 0; x < w; x++)
 			{
-				int i = (y * w + x) * 2;
+				int i = (y * w + x) * MASK_SHORTS;
 				int b = buildings.building[x][y];
 				if (b > MASK_MAX_BUILDING)
 				{
@@ -955,30 +963,13 @@ public class LightManager
 				buildingMask[i] = (short) (b | buildings.corner[x][y] << 13);
 				int spill = buildings.spill[x][y];
 				buildingMask[i + 1] = (short) ((spill & BuildingMap.SPILL_ID_MASK) > MASK_MAX_BUILDING ? 0 : spill);
+				// why a roofed tile isn't a building, for the debug view
+				buildingMask[i + 2] = (short) buildings.rejected[x][y];
 			}
 		}
 		maskChanged = true;
 	}
 
-	/**
-	 * Whether a tile is an outdoor floor, such as the walkway on top of a town wall. What's under it is covered but
-	 * isn't a building.
-	 */
-	private static boolean isOpenFloor(Tile[][][] tiles, byte[][][] settings, CollisionData[] maps, int plane, int x, int y)
-	{
-		if (plane >= tiles.length || (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0)
-		{
-			return false;
-		}
-		// a flat roof is a floor too, but you can't walk on it
-		if (plane >= maps.length || maps[plane] == null
-			|| (maps[plane].getFlags()[x][y] & CollisionDataFlag.BLOCK_MOVEMENT_FLOOR) != 0)
-		{
-			return false;
-		}
-		Tile tile = tiles[plane][x][y];
-		return tile != null && (tile.getSceneTilePaint() != null || tile.getSceneTileModel() != null);
-	}
 
 	private static void markEdges(boolean[][] north, boolean[][] east, int x, int y, int orientation)
 	{
@@ -1003,6 +994,35 @@ public class LightManager
 	/** Puts ceiling lights in each lit building, spread over the cells it covers. */
 	private void placeBuildingLights(WorldView wv)
 	{
+		// buildings with lamps or torches of their own don't need a ceiling light too, so they don't blow out
+		Set<Integer> selfLit = new HashSet<>();
+		Map<Integer, Integer> candles = new HashMap<>();
+		if (buildings != null)
+		{
+			for (Light light : objectLights.values())
+			{
+				if (light.wallMounted)
+				{
+					pickWallSide(light);
+				}
+				int side = sideOf(light);
+				if (side <= 0)
+				{
+					continue;
+				}
+				if (light.type == LightType.CANDLE)
+				{
+					if (candles.merge(side, 1, Integer::sum) >= SELF_LIT_CANDLES)
+					{
+						selfLit.add(side);
+					}
+				}
+				else
+				{
+					selfLit.add(side);
+				}
+			}
+		}
 		Map<Long, Float> oldLevels = new HashMap<>(previousLevels);
 		for (Light light : buildingLights)
 		{
@@ -1018,7 +1038,7 @@ public class LightManager
 		Map<Integer, int[]> cells = new HashMap<>();
 		for (int b = 0; b < buildings.buildingCount(); b++)
 		{
-			if (!buildings.lit.get(b) || b + 1 > MASK_MAX_BUILDING)
+			if (!buildings.lit.get(b) || b + 1 > MASK_MAX_BUILDING || selfLit.contains(b + 1))
 			{
 				continue;
 			}

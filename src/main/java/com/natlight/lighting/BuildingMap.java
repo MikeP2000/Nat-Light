@@ -84,6 +84,10 @@ public class BuildingMap
 	public final int[][] spill;
 	/** Which half of each angled-corner tile is inside, see {@link #CORNER_NE}. */
 	public final int[][] corner;
+	/** For the debug view: why a roofed tile isn't part of a building, {@link #REJECT_SMALL} or {@link #REJECT_OPEN}. */
+	public final int[][] rejected;
+	public static final int REJECT_SMALL = 2;
+	public static final int REJECT_OPEN = 3;
 	/** Tiles of each building, as x << 16 | y, indexed by id - 1. */
 	public final List<int[]> buildingTiles = new ArrayList<>();
 	/** Whether each building, indexed by id - 1, is lit because an NPC is in it or can walk to it. */
@@ -119,6 +123,7 @@ public class BuildingMap
 		this.building = new int[width][height];
 		this.spill = new int[width][height];
 		this.corner = new int[width][height];
+		this.rejected = new int[width][height];
 		this.area = new int[width][height];
 
 		findCorners(underRoof);
@@ -255,8 +260,13 @@ public class BuildingMap
 			{
 				building[t >> 16][t & 0xFFFF] = mark;
 			}
-			if (groupTiles.size() < MIN_BUILDING_TILES || isOpen(groupTiles.stream().mapToInt(Integer::intValue).toArray(), mark, underRoof))
+			boolean small = groupTiles.size() < MIN_BUILDING_TILES;
+			if (small || isOpen(groupTiles.stream().mapToInt(Integer::intValue).toArray(), mark, underRoof))
 			{
+				for (int t : groupTiles)
+				{
+					rejected[t >> 16][t & 0xFFFF] = small ? REJECT_SMALL : REJECT_OPEN;
+				}
 				// too small to be a building, e.g. a lone roofed tile, or roofed but not walled in
 				continue;
 			}
