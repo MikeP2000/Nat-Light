@@ -1144,7 +1144,8 @@ public class LightManager
 		String name = def.getName();
 		if (name == null || name.equals("null"))
 		{
-			return null;
+			// scenery you can't interact with, like many wall torches, has no name, so it's looked up by id
+			return LightObjects.BY_ID.get(def.getId());
 		}
 		// unlit torches and candles offer "Light"
 		String[] actions = def.getActions();
