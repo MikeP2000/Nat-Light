@@ -161,6 +161,8 @@ public class LightManager
 
 	// Buildings on the player's plane, and the ones lit because an NPC is in them or can walk to them
 	private BuildingMap buildings;
+	// the same for every floor, so lights on other floors stay behind their own floor's walls
+	private BuildingMap[] floors = new BuildingMap[0];
 	private int buildingPlane = -1;
 	private int buildingBaseX;
 	private int buildingBaseY;
@@ -521,8 +523,6 @@ public class LightManager
 		float[][] scores = new float[w * h][];
 		int[] visited = new int[w * h];
 		int visit = 0;
-		// lights on other floors are kept in by that floor's walls, not the walls of the floor the player is on
-		CollisionData[] maps = wv.getCollisionMaps();
 		ArrayDeque<Integer> queue = new ArrayDeque<>();
 		lightData = new float[Math.max(1, staticCount) * 8];
 		for (int i = 0; i < staticCount; i++)
@@ -554,12 +554,10 @@ public class LightManager
 			{
 				continue;
 			}
-			int[][] floorFlags = null;
-			if (buildings != null && light.plane != buildingPlane && maps != null && light.plane >= 0
-				&& light.plane < maps.length && maps[light.plane] != null)
-			{
-				floorFlags = maps[light.plane].getFlags();
-			}
+			// lights on other floors are kept in by that floor's walls, not the walls of the floor the player is on.
+			// The shader only knows the player's floor, so it doesn't confine them itself.
+			BuildingMap floor = floorOf(light);
+			int side = light.plane == buildingPlane ? light.building : floor == null ? 0 : sideOf(floor, light);
 			visit++;
 			visited[ly * w + lx] = visit;
 			queue.clear();
@@ -572,7 +570,7 @@ public class LightManager
 				float dx = (x + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.x;
 				float dz = (y + 0.5f) * Perspective.LOCAL_TILE_SIZE - light.z;
 				float d = (float) Math.sqrt(dx * dx + dz * dz);
-				if (reaches(light.building, x, y))
+				if (reaches(floor, side, x, y))
 				{
 					// when a tile has more lights than slots, keep the ones that light it most
 					float f = Math.max(0f, 1f - d / reach);
@@ -583,8 +581,7 @@ public class LightManager
 					int nx = x + BuildingMap.DX[dir];
 					int ny = y + BuildingMap.DY[dir];
 					if (nx < 0 || ny < 0 || nx >= w || ny >= h || visited[ny * w + nx] == visit
-						|| (floorFlags != null ? !BuildingMap.lightPasses(floorFlags, x, y, dir)
-						: buildings != null && !(light.building > 0 ? buildings.canSee(x, y, dir) : buildings.lightPasses(x, y, dir))))
+						|| (floor != null && !(side > 0 ? floor.canSee(x, y, dir) : floor.lightPasses(x, y, dir))))
 					{
 						continue;
 					}
@@ -727,7 +724,7 @@ public class LightManager
 	 * Whether a light on the given side of the walls can reach any part of a tile, judged from the tile and its
 	 * neighbours since walls and floors near a tile edge take their light from the tile next door.
 	 */
-	private boolean reaches(int building, int x, int y)
+	private static boolean reaches(BuildingMap buildings, int building, int x, int y)
 	{
 		if (building == 0 || buildings == null)
 		{
@@ -767,7 +764,8 @@ public class LightManager
 	{
 		light.x = light.hungX;
 		light.z = light.hungZ;
-		if (buildings == null || light.plane != buildingPlane || buildingAt(light.x, light.z) > 0)
+		BuildingMap floor = floorOf(light);
+		if (floor == null || buildingAt(floor, light.x, light.z) > 0)
 		{
 			return;
 		}
@@ -787,14 +785,20 @@ public class LightManager
 		{
 			mz = fz < tile / 2 ? light.z - 2 * fz - 1 : light.z + 2 * (tile - fz) + 1;
 		}
-		if (buildingAt(mx, mz) > 0)
+		if (buildingAt(floor, mx, mz) > 0)
 		{
 			light.x = mx;
 			light.z = mz;
 		}
 	}
 
-	private int buildingAt(float x, float z)
+	/** The building map of the floor a light is on, or null if there isn't one. */
+	private BuildingMap floorOf(Light light)
+	{
+		return light.plane >= 0 && light.plane < floors.length ? floors[light.plane] : null;
+	}
+
+	private static int buildingAt(BuildingMap buildings, float x, float z)
 	{
 		int tx = (int) Math.floor(x / Perspective.LOCAL_TILE_SIZE);
 		int ty = (int) Math.floor(z / Perspective.LOCAL_TILE_SIZE);
@@ -816,6 +820,11 @@ public class LightManager
 		{
 			return 0;
 		}
+		return sideOf(buildings, light);
+	}
+
+	private static int sideOf(BuildingMap buildings, Light light)
+	{
 		int tx = (int) Math.floor(light.x / Perspective.LOCAL_TILE_SIZE);
 		int ty = (int) Math.floor(light.z / Perspective.LOCAL_TILE_SIZE);
 		if (tx < 0 || ty < 0 || tx >= buildings.width || ty >= buildings.height)
@@ -871,6 +880,7 @@ public class LightManager
 	private void rebuildBuildings(WorldView wv)
 	{
 		buildings = null;
+		floors = new BuildingMap[0];
 		buildingLights.clear();
 		lightsDirty = true;
 		buildingPlane = wv.getPlane();
@@ -881,11 +891,52 @@ public class LightManager
 
 		CollisionData[] maps = wv.getCollisionMaps();
 		int plane = buildingPlane;
-		// the map is built even with building lights off, since it also keeps torches and stoves on their side of
+		// the maps are built even with building lights off, since they also keep torches and stoves on their side of
 		// the walls
-		if (maps == null || maps[plane] == null)
+		floors = new BuildingMap[maps == null ? 0 : maps.length];
+		for (int p = 0; p < floors.length; p++)
+		{
+			floors[p] = mapFloor(wv, maps, p);
+		}
+		buildings = plane < floors.length ? floors[plane] : null;
+		if (buildings == null)
 		{
 			return;
+		}
+
+		buildingBaseX = wv.getBaseX();
+		buildingBaseY = wv.getBaseY();
+		for (int b = 0; b < buildings.buildingCount(); b++)
+		{
+			// big buildings like castles, halls and churches are kept lit whether or not an NPC can reach them
+			if (rememberedLit.contains(buildingKey(b)) || buildings.buildingTiles.get(b).length >= LARGE_BUILDING_TILES)
+			{
+				buildings.lit.set(b, true);
+			}
+		}
+		for (NPC npc : wv.npcs())
+		{
+			if (npc.getWorldLocation().getPlane() == plane)
+			{
+				LocalPoint lp = npc.getLocalLocation();
+				buildings.npcAt(lp.getSceneX(), lp.getSceneY());
+			}
+		}
+		rememberLit();
+		placeBuildingLights(wv);
+
+		maskWidth = buildings.width;
+		maskHeight = buildings.height;
+		buildingMask = new short[maskWidth * maskHeight * MASK_SHORTS];
+		writeMask();
+	}
+
+	/** Splits one floor of the scene into buildings. */
+	private BuildingMap mapFloor(WorldView wv, CollisionData[] maps, int plane)
+	{
+		if (maps[plane] == null)
+		{
+			return null;
 		}
 
 		int[][] flags = maps[plane].getFlags();
@@ -928,32 +979,7 @@ public class LightManager
 			}
 		}
 
-		buildings = new BuildingMap(f, underRoof, doorNorth, doorEast, windowNorth, windowEast);
-		buildingBaseX = wv.getBaseX();
-		buildingBaseY = wv.getBaseY();
-		for (int b = 0; b < buildings.buildingCount(); b++)
-		{
-			// big buildings like castles, halls and churches are kept lit whether or not an NPC can reach them
-			if (rememberedLit.contains(buildingKey(b)) || buildings.buildingTiles.get(b).length >= LARGE_BUILDING_TILES)
-			{
-				buildings.lit.set(b, true);
-			}
-		}
-		for (NPC npc : wv.npcs())
-		{
-			if (npc.getWorldLocation().getPlane() == plane)
-			{
-				LocalPoint lp = npc.getLocalLocation();
-				buildings.npcAt(lp.getSceneX(), lp.getSceneY());
-			}
-		}
-		rememberLit();
-		placeBuildingLights(wv);
-
-		maskWidth = w;
-		maskHeight = h;
-		buildingMask = new short[w * h * MASK_SHORTS];
-		writeMask();
+		return new BuildingMap(f, underRoof, doorNorth, doorEast, windowNorth, windowEast);
 	}
 
 	private void writeMask()
