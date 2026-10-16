@@ -26,7 +26,9 @@ package com.natlight.lighting;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import net.runelite.api.CollisionDataFlag;
 
 /**
@@ -41,12 +43,15 @@ public class BuildingMap
 {
 	static final int MIN_BUILDING_TILES = 4;
 	private static final int SPILL_TILES = 2;
-	// A roofed area with more of its outline open than this is an overhang or canopy, not a room
-	private static final float MAX_OPEN_OUTLINE = 0.3f;
 	/** Buildings with a gap in their walls (other than a door) must be at least this big... */
 	private static final int MIN_OPEN_BUILDING_TILES = 9;
-	/** ...and have at most this much of their outline open. */
+	/**
+	 * ...and have at most this much of their outline in gaps wider than a doorway. More than that and it's an
+	 * overhang, canopy or lean-to, not a room.
+	 */
 	private static final float MAX_OPEN_OUTLINE_SMALL = 0.15f;
+	/** Gaps in a wall up to this many tiles wide are doorways or archways, which rooms have. */
+	private static final int MAX_DOORWAY_WIDTH = 3;
 	/** Spill values carry the building id in the low 14 bits and how strong the spill is (1-2) above them. */
 	public static final int SPILL_ID_MASK = 0x3FFF;
 	public static final int SPILL_LEVEL_SHIFT = 14;
@@ -441,11 +446,15 @@ public class BuildingMap
 		}
 	}
 
-	/** Whether too much of an area's outline has no wall, e.g. the ground under a roof's overhang. */
+	/**
+	 * Whether too much of an area's outline has no wall, e.g. the ground under a roof's overhang. Gaps no wider than a
+	 * doorway, like an archway into a hall or the ends of a gatehouse passage, don't count, except in a space too
+	 * small to be a room, such as an alcove under a wall walkway.
+	 */
 	private boolean isOpen(int[] tiles, int id, boolean[][] underRoof)
 	{
 		int outline = 0;
-		int open = 0;
+		Set<Long> openEdges = new HashSet<>();
 		for (int t : tiles)
 		{
 			int tx = t >> 16;
@@ -461,16 +470,55 @@ public class BuildingMap
 				outline++;
 				if (inBounds(nx, ny) && corner[tx][ty] == CORNER_NONE && !underRoof[nx][ny] && !blocked(tx, ty, d) && !isDoor(tx, ty, d))
 				{
-					open++;
+					openEdges.add((long) t << 2 | d);
 				}
 			}
 		}
-		if (open > outline * MAX_OPEN_OUTLINE)
+		if (openEdges.isEmpty())
+		{
+			return false;
+		}
+		if (tiles.length < MIN_OPEN_BUILDING_TILES)
 		{
 			return true;
 		}
-		// a small roofed space with a gap in its side, such as an alcove under a wall walkway, isn't a building either
-		return open > 0 && (tiles.length < MIN_OPEN_BUILDING_TILES || open > outline * MAX_OPEN_OUTLINE_SMALL);
+
+		// measure each gap along the wall; only ones wider than a doorway make the area open
+		int wide = 0;
+		Set<Long> seen = new HashSet<>();
+		ArrayDeque<Long> queue = new ArrayDeque<>();
+		for (long start : openEdges)
+		{
+			if (!seen.add(start))
+			{
+				continue;
+			}
+			int d = (int) (start & 3);
+			// a gap in a north or south wall runs east-west, and the other way round
+			int sx = d % 2 == 0 ? 1 : 0;
+			int sy = 1 - sx;
+			int run = 0;
+			queue.add(start);
+			while (!queue.isEmpty())
+			{
+				long e = queue.poll();
+				run++;
+				int t = (int) (e >> 2);
+				for (int s = -1; s <= 1; s += 2)
+				{
+					long next = (long) ((t >> 16) + s * sx << 16 | (t & 0xFFFF) + s * sy) << 2 | d;
+					if (openEdges.contains(next) && seen.add(next))
+					{
+						queue.add(next);
+					}
+				}
+			}
+			if (run > MAX_DOORWAY_WIDTH)
+			{
+				wide += run;
+			}
+		}
+		return wide > outline * MAX_OPEN_OUTLINE_SMALL;
 	}
 
 	private boolean walkable(int x, int y)
@@ -504,6 +552,18 @@ public class BuildingMap
 	public boolean lightPasses(int x, int y, int d)
 	{
 		return !sightBlocked(x, y, d) && !blocked(x, y, d);
+	}
+
+	/**
+	 * Whether light gets from tile (x, y) to its neighbour in direction d on a plane with the given collision flags,
+	 * for lights on another floor than the one mapped into buildings.
+	 */
+	public static boolean lightPasses(int[][] flags, int x, int y, int d)
+	{
+		int nx = x + DX[d];
+		int ny = y + DY[d];
+		int back = (d + 2) % 4;
+		return (flags[x][y] & (MOVE[d] | SIGHT[d])) == 0 && (flags[nx][ny] & (MOVE[back] | SIGHT[back])) == 0;
 	}
 
 	private boolean sightBlocked(int x, int y, int d)

@@ -31,8 +31,8 @@ import java.util.Map;
 import net.runelite.api.gameval.ObjectID;
 
 /**
- * Light sources that have no name in the game data, such as many wall torches and candles, so they can't be found
- * by name. Generated from the object names in {@link ObjectID}.
+ * Light sources that can't be found by name: ones with no name in the game data, such as many wall torches and
+ * candles (generated from the object names in {@link ObjectID}), and furniture with candles on it.
  */
 final class LightObjects
 {
@@ -926,7 +926,24 @@ final class LightObjects
 		ObjectID.DEEPFIN_FURNACE,
 	};
 
+	/**
+	 * Tables and stands with lit candles on them. They're named for the furniture ("Table"), so the name doesn't
+	 * give them away. Picked by hand from {@link ObjectID}.
+	 */
+	private static final int[] CANDLE_FURNITURE = {
+		ObjectID.FAI_FALADOR_BANQUET_TABLE,
+		ObjectID.FAI_VARROCK_POSH_CANDLESTICK,
+		ObjectID.VIKING_LONGHALL_TABLE_CANDLE,
+		ObjectID.QUEST_LUNAR_LONGHALL_TABLE_CANDLE,
+		ObjectID.AHOY_GHOSTSHIP_TABLE_CANDLE,
+		ObjectID.BRAIN_MON_CANDLE_TABLE,
+		ObjectID.WYRMSCRAIG_CATHEDRAL_CANDLE_TABLE,
+		ObjectID.CASTLE_DRAKAN_LOWERNIEL_CANDLESTICK,
+	};
+
 	static final Map<Integer, LightType> BY_ID;
+	/** Named objects that are lights though their names don't say so, looked up before the name. */
+	static final Map<Integer, LightType> NAMED_BY_ID;
 
 	static
 	{
@@ -937,6 +954,10 @@ final class LightObjects
 		put(map, CANDLES, LightType.CANDLE);
 		put(map, FURNACES, LightType.FURNACE);
 		BY_ID = Collections.unmodifiableMap(map);
+
+		Map<Integer, LightType> named = new HashMap<>();
+		put(named, CANDLE_FURNITURE, LightType.CANDLE);
+		NAMED_BY_ID = Collections.unmodifiableMap(named);
 	}
 
 	private static void put(Map<Integer, LightType> map, int[] ids, LightType type)

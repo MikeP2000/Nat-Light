@@ -89,6 +89,8 @@ public class LightManager
 		.put("candle", LightType.CANDLE)
 		.put("candles", LightType.CANDLE)
 		.put("candelabra", LightType.CANDLE)
+		.put("candlestick", LightType.CANDLE)
+		.put("candlesticks", LightType.CANDLE)
 		.put("furnace", LightType.FURNACE)
 		.put("range", LightType.FURNACE)
 		.put("stove", LightType.FURNACE)
@@ -519,6 +521,8 @@ public class LightManager
 		float[][] scores = new float[w * h][];
 		int[] visited = new int[w * h];
 		int visit = 0;
+		// lights on other floors are kept in by that floor's walls, not the walls of the floor the player is on
+		CollisionData[] maps = wv.getCollisionMaps();
 		ArrayDeque<Integer> queue = new ArrayDeque<>();
 		lightData = new float[Math.max(1, staticCount) * 8];
 		for (int i = 0; i < staticCount; i++)
@@ -550,6 +554,12 @@ public class LightManager
 			{
 				continue;
 			}
+			int[][] floorFlags = null;
+			if (buildings != null && light.plane != buildingPlane && maps != null && light.plane >= 0
+				&& light.plane < maps.length && maps[light.plane] != null)
+			{
+				floorFlags = maps[light.plane].getFlags();
+			}
 			visit++;
 			visited[ly * w + lx] = visit;
 			queue.clear();
@@ -573,7 +583,8 @@ public class LightManager
 					int nx = x + BuildingMap.DX[dir];
 					int ny = y + BuildingMap.DY[dir];
 					if (nx < 0 || ny < 0 || nx >= w || ny >= h || visited[ny * w + nx] == visit
-						|| (buildings != null && !(light.building > 0 ? buildings.canSee(x, y, dir) : buildings.lightPasses(x, y, dir))))
+						|| (floorFlags != null ? !BuildingMap.lightPasses(floorFlags, x, y, dir)
+						: buildings != null && !(light.building > 0 ? buildings.canSee(x, y, dir) : buildings.lightPasses(x, y, dir))))
 					{
 						continue;
 					}
@@ -1278,6 +1289,11 @@ public class LightManager
 		{
 			// scenery you can't interact with, like many wall torches, has no name, so it's looked up by id
 			return LightObjects.BY_ID.get(def.getId());
+		}
+		LightType furniture = LightObjects.NAMED_BY_ID.get(def.getId());
+		if (furniture != null)
+		{
+			return furniture;
 		}
 		// unlit torches and candles offer "Light"
 		String[] actions = def.getActions();
