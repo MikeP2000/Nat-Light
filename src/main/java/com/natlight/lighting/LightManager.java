@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 import net.runelite.api.Client;
 import net.runelite.api.CollisionData;
+import net.runelite.api.CollisionDataFlag;
 import net.runelite.api.Constants;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
@@ -118,13 +119,17 @@ public class LightManager
 	private static final class Light
 	{
 		final LightType type;
-		final float x;
+		float x;
 		final float y;
-		final float z;
+		float z;
 		float phase;
 		final int plane;
 		/** Lights placed by this class always stay in their building; others are worked out each frame. */
 		final boolean fixedBuilding;
+		/** For a light hung on a wall, where its model puts it, to pick a side of the wall from. */
+		boolean wallMounted;
+		float hungX;
+		float hungZ;
 		/** Building the light is confined to, {@link #OUTSIDE} for outdoors, 0 for not confined. */
 		int building;
 		float distance;
@@ -188,7 +193,7 @@ public class LightManager
 	 */
 	public float[] lightData = new float[8];
 	public int staticCount;
-	/** The most light the ceiling lights may add up to anywhere, so rooms with several aren't brighter than others. */
+	/** The most light a room's lights may add up to anywhere, so rooms with several aren't brighter than others. */
 	public float interiorLimit;
 	/**
 	 * Which static lights reach each tile, {@link #GRID_SLOTS} per tile as light index + 1 (0 for none), in four RGBA
@@ -211,6 +216,10 @@ public class LightManager
 	private static final int OUTSIDE = -1;
 	/** Added to a ceiling light's building in the light data, so the shader can even out overlapping ones. */
 	private static final int INTERIOR_FLAG = 8192;
+	/** The most the lights of a room add up to, before the overall brightness. */
+	private static final float ROOM_LIGHT_LIMIT = 0.75f;
+	/** How far below the top of a wall light's model its light sits, in local units (up is negative). */
+	private static final int WALL_LIGHT_BELOW_TOP = 12;
 	private static final int PLAZA_MIN_BOOTHS = 4;
 	private static final int PLAZA_LAMPS = 12;
 	private static final float PLAZA_RADIUS = 11 * Perspective.LOCAL_TILE_SIZE;
@@ -306,6 +315,7 @@ public class LightManager
 		}
 		int x = object.getX();
 		int z = object.getY();
+		int y = object.getZ() - type.height;
 		if (object instanceof DecorativeObject)
 		{
 			// a wall torch hangs on one face of its wall. The middle of its model says which face, so the light goes
@@ -318,21 +328,34 @@ public class LightManager
 			if (model != null && model.getVerticesCount() > 0)
 			{
 				float[] vx = model.getVerticesX();
+				float[] vy = model.getVerticesY();
 				float[] vz = model.getVerticesZ();
 				float sx = 0;
 				float sz = 0;
+				float top = 0;
 				int n = model.getVerticesCount();
 				for (int i = 0; i < n; i++)
 				{
 					sx += vx[i];
 					sz += vz[i];
+					top = Math.min(top, vy[i]);
 				}
 				x += Math.round(sx / n);
 				z += Math.round(sz / n);
+				// wall lights hang at all heights, so the light goes just under the top of the model, where the flame
+				// or lamp is
+				y = object.getZ() + Math.round(top) + WALL_LIGHT_BELOW_TOP;
 			}
 		}
 		// keyed on the first frame it's drawn, once the area has finished loading and its base is settled
-		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
+		Light light = new Light(type, x, y, z, object.getPlane(), false);
+		if (object instanceof DecorativeObject)
+		{
+			light.wallMounted = true;
+			light.hungX = x;
+			light.hungZ = z;
+		}
+		objectLights.put(object.getHash(), light);
 		lightsDirty = true;
 	}
 
@@ -410,7 +433,7 @@ public class LightManager
 		count = 0;
 		Player player = client.getLocalPlayer();
 		float time = cycle / 50f * 2f * (float) Math.PI;
-		interiorLimit = LightType.INTERIOR.strength * brightness;
+		interiorLimit = ROOM_LIGHT_LIMIT * brightness;
 		for (int i = 0; i < staticCount; i++)
 		{
 			Light light = staticLights.get(i);
@@ -496,6 +519,10 @@ public class LightManager
 			Light light = staticLights.get(i);
 			if (!light.fixedBuilding)
 			{
+				if (light.wallMounted)
+				{
+					pickWallSide(light);
+				}
 				light.building = sideOf(light);
 			}
 			float radius = light.type.radius * Perspective.LOCAL_TILE_SIZE;
@@ -504,7 +531,7 @@ public class LightManager
 			lightData[o + 1] = light.y;
 			lightData[o + 2] = light.z;
 			lightData[o + 3] = radius;
-			lightData[staticCount * 4 + o + 3] = light.building + (light.type == LightType.INTERIOR ? INTERIOR_FLAG : 0);
+			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0);
 
 			// spread out from the light's tile to tiles whose middle is within the radius plus a tile's half-diagonal
 			// and a bit, without crossing walls, so light from a campfire in a roofless hut stays inside the hut
@@ -538,7 +565,7 @@ public class LightManager
 					int nx = x + BuildingMap.DX[dir];
 					int ny = y + BuildingMap.DY[dir];
 					if (nx < 0 || ny < 0 || nx >= w || ny >= h || visited[ny * w + nx] == visit
-						|| (buildings != null && !buildings.lightPasses(x, y, dir)))
+						|| (buildings != null && !(light.building > 0 ? buildings.canSee(x, y, dir) : buildings.lightPasses(x, y, dir))))
 					{
 						continue;
 					}
@@ -623,6 +650,30 @@ public class LightManager
 		}
 	}
 
+	/**
+	 * Ceiling lights, lamps and candles inside a building, which together light the room evenly rather than adding
+	 * up. Fires and furnaces still add their own glow on top.
+	 */
+	private static boolean isRoomLight(Light light)
+	{
+		if (light.building <= 0)
+		{
+			return false;
+		}
+		switch (light.type)
+		{
+			case INTERIOR:
+			case LAMP:
+			case CANDLE:
+			case TORCH:
+			case BOOTH:
+			case EXCHANGE_BOOTH:
+				return true;
+			default:
+				return false;
+		}
+	}
+
 	private static void addToTile(short[][] slots, float[][] scores, int t, short light, float score)
 	{
 		if (slots[t] == null)
@@ -683,6 +734,53 @@ public class LightManager
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Picks which side of its wall a wall light hangs on. Its model usually says, but lamps and torches on a
+	 * building's wall are nearly always hung inside, so when only the other side is in a building it moves there.
+	 */
+	private void pickWallSide(Light light)
+	{
+		light.x = light.hungX;
+		light.z = light.hungZ;
+		if (buildings == null || light.plane != buildingPlane || buildingAt(light.x, light.z) > 0)
+		{
+			return;
+		}
+		// the other side: mirror the light across the nearest edge of the tile it sits on
+		float tile = Perspective.LOCAL_TILE_SIZE;
+		float fx = light.x - (float) Math.floor(light.x / tile) * tile;
+		float fz = light.z - (float) Math.floor(light.z / tile) * tile;
+		float mx = light.x;
+		float mz = light.z;
+		float edgeX = Math.min(fx, tile - fx);
+		float edgeZ = Math.min(fz, tile - fz);
+		if (edgeX < edgeZ)
+		{
+			mx = fx < tile / 2 ? light.x - 2 * fx - 1 : light.x + 2 * (tile - fx) + 1;
+		}
+		else
+		{
+			mz = fz < tile / 2 ? light.z - 2 * fz - 1 : light.z + 2 * (tile - fz) + 1;
+		}
+		if (buildingAt(mx, mz) > 0)
+		{
+			light.x = mx;
+			light.z = mz;
+		}
+	}
+
+	private int buildingAt(float x, float z)
+	{
+		int tx = (int) Math.floor(x / Perspective.LOCAL_TILE_SIZE);
+		int ty = (int) Math.floor(z / Perspective.LOCAL_TILE_SIZE);
+		if (tx < 0 || ty < 0 || tx >= buildings.width || ty >= buildings.height)
+		{
+			return 0;
+		}
+		int b = buildings.building[tx][ty];
+		return b > MASK_MAX_BUILDING ? 0 : b;
 	}
 
 	/**
@@ -784,7 +882,7 @@ public class LightManager
 			{
 				f[x][y] = flags[x][y];
 				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0
-					&& !isOpenFloor(tiles, settings, plane + 1, x, y);
+					&& !isOpenFloor(tiles, settings, maps, plane + 1, x, y);
 				Tile tile = tiles[plane][x][y];
 				if (tile == null)
 				{
@@ -866,9 +964,15 @@ public class LightManager
 	 * Whether a tile is an outdoor floor, such as the walkway on top of a town wall. What's under it is covered but
 	 * isn't a building.
 	 */
-	private static boolean isOpenFloor(Tile[][][] tiles, byte[][][] settings, int plane, int x, int y)
+	private static boolean isOpenFloor(Tile[][][] tiles, byte[][][] settings, CollisionData[] maps, int plane, int x, int y)
 	{
 		if (plane >= tiles.length || (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0)
+		{
+			return false;
+		}
+		// a flat roof is a floor too, but you can't walk on it
+		if (plane >= maps.length || maps[plane] == null
+			|| (maps[plane].getFlags()[x][y] & CollisionDataFlag.BLOCK_MOVEMENT_FLOOR) != 0)
 		{
 			return false;
 		}
@@ -978,6 +1082,10 @@ public class LightManager
 	{
 		for (Light light : objectLights.values())
 		{
+			if (light.wallMounted)
+			{
+				pickWallSide(light);
+			}
 			// candles are too dim to light a room, and a torch on the other side of a wall doesn't light this one
 			if (light.type == LightType.CANDLE || sideOf(light) != building)
 			{

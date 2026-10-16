@@ -52,8 +52,8 @@ uniform sampler2D lightData;
 #define GRID_SLOTS 16
 #define GRID_TEXELS 4
 uniform usampler2D lightGrid;
-// ceiling lights (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several of them
-// aren't brighter than rooms with one
+// the lights of a room (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several
+// lights aren't brighter than rooms with one
 #define INTERIOR_FLAG 8192
 uniform float interiorLimit;
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
@@ -152,9 +152,6 @@ vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
       mix(lightShare(sFloorV00, sFloorTile, sHere, building), lightShare(sFloorV10, sFloorTile + ivec2(1, 0), sHere, building), sFloorFrac.x),
       mix(lightShare(sFloorV01, sFloorTile + ivec2(0, 1), sHere, building), lightShare(sFloorV11, sFloorTile + ivec2(1, 1), sHere, building), sFloorFrac.x),
       sFloorFrac.y);
-    // only blend on floors that get some of the light themselves, so it never creeps out past the walls
-    float own = lightShare(sHereV, sHereTile, sHere, building);
-    floorShare = own <= 0.0 ? 0.0 : min(floorShare, own);
     share = mix(wallShare, floorShare, sFloorness);
     if (share <= 0.0) {
       return vec3(0.0);

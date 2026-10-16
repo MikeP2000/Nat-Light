@@ -481,6 +481,12 @@ public class BuildingMap
 		return (flags[x][y] & MOVE[d]) != 0 || (flags[nx][ny] & MOVE[(d + 2) % 4]) != 0;
 	}
 
+	/** Whether you can see from tile (x, y) to its neighbour in direction d. */
+	public boolean canSee(int x, int y, int d)
+	{
+		return !sightBlocked(x, y, d);
+	}
+
 	/**
 	 * Whether light gets from tile (x, y) to its neighbour in direction d. Any wall, fence or closed door stops it,
 	 * including ones you can see over, since some walls (like Barbarian Village's) don't block sight in the game data.
