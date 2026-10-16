@@ -68,7 +68,6 @@ import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GroundObjectDespawned;
 import net.runelite.api.events.GroundObjectSpawned;
-import net.runelite.api.events.NpcDespawned;
 import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.PostClientTick;
 import net.runelite.api.events.WallObjectDespawned;
@@ -296,6 +295,10 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniPointLightCount;
 	private int uniPointLightPos;
 	private int uniPointLightColor;
+	private int uniPointLightBuilding;
+	private int uniBuildingMap;
+	// per-tile building ids that keep building lights inside their walls, bound to texture unit 2
+	private int buildingMapTexture = -1;
 
 	// Underground areas and dungeons sit above this world y coordinate, and stay unaffected by the time of day
 	private static final int UNDERGROUND_MIN_Y = 4500;
@@ -492,6 +495,12 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 					textureArrayId = -1;
 				}
 
+				if (buildingMapTexture != -1)
+				{
+					glDeleteTextures(buildingMapTexture);
+					buildingMapTexture = -1;
+				}
+
 				root.free();
 
 				shutdownInterfaceTexture();
@@ -684,6 +693,8 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniPointLightCount = glGetUniformLocation(glProgram, "pointLightCount");
 		uniPointLightPos = glGetUniformLocation(glProgram, "pointLightPos");
 		uniPointLightColor = glGetUniformLocation(glProgram, "pointLightColor");
+		uniPointLightBuilding = glGetUniformLocation(glProgram, "pointLightBuilding");
+		uniBuildingMap = glGetUniformLocation(glProgram, "buildingMap");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
 		uniTexTargetDimensions = glGetUniformLocation(glUiProgram, "targetDimensions");
@@ -1125,7 +1136,30 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		{
 			glUniform4fv(uniPointLightPos, lightManager.positions);
 			glUniform4fv(uniPointLightColor, lightManager.colors);
+			glUniform1iv(uniPointLightBuilding, lightManager.lightBuildings);
 		}
+
+		if (buildingMapTexture == -1)
+		{
+			buildingMapTexture = glGenTextures();
+			glActiveTexture(GL_TEXTURE2);
+			glBindTexture(GL_TEXTURE_2D, buildingMapTexture);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			lightManager.maskChanged = true;
+		}
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, buildingMapTexture);
+		if (lightManager.maskChanged)
+		{
+			lightManager.maskChanged = false;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16UI, lightManager.maskWidth, lightManager.maskHeight, 0,
+				GL_RG_INTEGER, GL_UNSIGNED_SHORT, lightManager.buildingMask);
+		}
+		glActiveTexture(GL_TEXTURE0);
+		glUniform1i(uniBuildingMap, 2);
 	}
 
 	@Subscribe
@@ -1144,12 +1178,14 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	public void onWallObjectSpawned(WallObjectSpawned event)
 	{
 		lightManager.objectSpawned(event.getWallObject());
+		lightManager.wallObjectChanged(event.getWallObject());
 	}
 
 	@Subscribe
 	public void onWallObjectDespawned(WallObjectDespawned event)
 	{
 		lightManager.objectDespawned(event.getWallObject());
+		lightManager.wallObjectChanged(event.getWallObject());
 	}
 
 	@Subscribe
@@ -1180,12 +1216,6 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	public void onNpcSpawned(NpcSpawned event)
 	{
 		lightManager.npcSpawned(event.getNpc());
-	}
-
-	@Subscribe
-	public void onNpcDespawned(NpcDespawned event)
-	{
-		lightManager.npcDespawned(event.getNpc());
 	}
 
 	private boolean isUnderground()
@@ -1818,6 +1848,11 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		{
 			// the new scene's objects arrive as spawn events
 			lightManager.clear();
+		}
+		else if (state == GameState.LOGGED_IN)
+		{
+			// the area's collision is ready now, so buildings can be found
+			lightManager.markBuildingsDirty();
 		}
 		if (state.getState() < GameState.LOADING.getState())
 		{

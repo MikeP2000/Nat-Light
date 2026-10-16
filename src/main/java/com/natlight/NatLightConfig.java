@@ -153,7 +153,7 @@ public interface NatLightConfig extends Config
 	@ConfigItem(
 		keyName = "indoorLights",
 		name = "Light occupied buildings",
-		description = "Add a soft ceiling light to buildings that have NPCs inside but no light source of their own.",
+		description = "Add a soft ceiling light to buildings that an NPC is in or can walk to. The light stays inside the walls and spills out through windows and open doorways.",
 		position = -3,
 		section = lightingSection
 	)

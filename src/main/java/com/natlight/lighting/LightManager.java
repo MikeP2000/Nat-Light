@@ -28,11 +28,14 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import net.runelite.api.Client;
+import net.runelite.api.CollisionData;
 import net.runelite.api.Constants;
+import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.NPC;
 import net.runelite.api.ObjectComposition;
@@ -42,6 +45,7 @@ import net.runelite.api.Projectile;
 import net.runelite.api.Scene;
 import net.runelite.api.Tile;
 import net.runelite.api.TileObject;
+import net.runelite.api.WallObject;
 import net.runelite.api.WorldView;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.gameval.SpotanimID;
@@ -54,9 +58,10 @@ public class LightManager
 {
 	public static final int MAX_LIGHTS = 32;
 	private static final int MAX_DISTANCE = 25 * Perspective.LOCAL_TILE_SIZE;
-	// Interior lights are shared by every NPC in the same cell of this many tiles, so a building gets one or two, not one per person
+	// Buildings get one ceiling light per cell of this many tiles that the building covers enough of
 	private static final int INTERIOR_CELL_TILES = 5;
-	// Skip an interior light when a real light source is already this close
+	private static final int INTERIOR_CELL_MIN_TILES = 3;
+	// Skip a ceiling light when a real light source is already this close
 	private static final int INTERIOR_SKIP_DISTANCE = 3 * Perspective.LOCAL_TILE_SIZE;
 
 	// Object names are matched word by word, so "Wall torch" is a torch but "Fire altar" is excluded below
@@ -106,6 +111,7 @@ public class LightManager
 		final float y;
 		final float z;
 		final float phase;
+		int building;
 		float distance;
 
 		Light(LightType type, float x, float y, float z)
@@ -123,27 +129,39 @@ public class LightManager
 	private final Map<Integer, LightType> typeCache = new HashMap<>();
 	private final Map<Long, Light> objectLights = new HashMap<>();
 	private final List<Light> candidates = new ArrayList<>();
-	private final Map<Integer, Integer> npcCells = new HashMap<>();
-	private final Map<Integer, InteriorLight> interiorLights = new HashMap<>();
-	private boolean interiorEnabled = true;
-
-	private static final class InteriorLight
-	{
-		final Light light;
-		int npcs;
-
-		InteriorLight(Light light)
-		{
-			this.light = light;
-		}
-	}
 	private boolean rescan = true;
+
+	// Buildings on the player's plane, and the ones lit because an NPC is in them or can walk to them
+	private BuildingMap buildings;
+	private int buildingPlane = -1;
+	private int buildingBaseX;
+	private int buildingBaseY;
+	private boolean buildingsDirty = true;
+	private boolean interiorEnabled = true;
+	private final List<Light> buildingLights = new ArrayList<>();
+	// lit buildings stay lit when the area reloads, keyed by the world position of their first tile
+	private final Set<Long> rememberedLit = new HashSet<>();
+	private final Map<Integer, Integer> edgeCache = new HashMap<>();
+	private static final int EDGE_NONE = 0;
+	private static final int EDGE_DOOR = 1;
+	private static final int EDGE_WINDOW = 2;
 
 	/** xyz position and radius of each light picked this frame, in local units. */
 	public final float[] positions = new float[MAX_LIGHTS * 4];
 	/** rgb color times brightness of each light picked this frame. */
 	public final float[] colors = new float[MAX_LIGHTS * 4];
+	/** Building each light picked this frame belongs to, or 0 for lights that aren't confined to a building. */
+	public final int[] lightBuildings = new int[MAX_LIGHTS];
 	public int count;
+
+	/**
+	 * Building id and spill id of each tile on the player's plane, two shorts per tile in row-major order
+	 * (y rows of x), for the shader to keep building lights inside their walls.
+	 */
+	public short[] buildingMask = new short[2];
+	public int maskWidth = 1;
+	public int maskHeight = 1;
+	public boolean maskChanged = true;
 
 	public LightManager(Client client)
 	{
@@ -154,17 +172,22 @@ public class LightManager
 	public void clear()
 	{
 		objectLights.clear();
-		npcCells.clear();
-		interiorLights.clear();
+		buildingsDirty = true;
 	}
 
-	/** Turns the lights for occupied buildings on or off. Turning them on picks up NPCs already in the scene. */
+	/** Rebuilds the building map next frame, e.g. once a newly loaded area's collision is in place. */
+	public void markBuildingsDirty()
+	{
+		buildingsDirty = true;
+	}
+
+	/** Turns lighting of occupied buildings on or off. */
 	public void setInteriorEnabled(boolean enabled)
 	{
 		if (enabled != interiorEnabled)
 		{
 			interiorEnabled = enabled;
-			rescan = true;
+			buildingsDirty = true;
 		}
 	}
 
@@ -176,71 +199,22 @@ public class LightManager
 		rescan = true;
 	}
 
-	/**
-	 * Lights the building an NPC is standing in when it spawns, if it is under a roof and the building has no
-	 * light source nearby. The light stays where the NPC spawned rather than following it around.
-	 */
+	/** Lights the building an NPC appears in, and every building it could walk to. */
 	public void npcSpawned(NPC npc)
 	{
-		if (!interiorEnabled || npc.getWorldView() == null || !npc.getWorldView().isTopLevel())
+		if (buildings == null || npc.getWorldView() == null || !npc.getWorldView().isTopLevel()
+			|| npc.getWorldLocation().getPlane() != buildingPlane)
 		{
 			return;
 		}
-		WorldView wv = npc.getWorldView();
 		LocalPoint lp = npc.getLocalLocation();
-		int plane = wv.getPlane();
-		int sx = lp.getSceneX();
-		int sy = lp.getSceneY();
-		if (sx < 0 || sy < 0 || sx >= wv.getSizeX() || sy >= wv.getSizeY()
-			|| (wv.getTileSettings()[plane][sx][sy] & Constants.TILE_FLAG_UNDER_ROOF) == 0)
+		int before = countLit();
+		buildings.npcAt(lp.getSceneX(), lp.getSceneY());
+		if (countLit() != before)
 		{
-			return;
+			rememberLit();
+			placeBuildingLights(npc.getWorldView());
 		}
-
-		int cell = (plane << 24) | ((sx / INTERIOR_CELL_TILES) << 12) | (sy / INTERIOR_CELL_TILES);
-		InteriorLight interior = interiorLights.get(cell);
-		if (interior == null)
-		{
-			int x = lp.getX();
-			int z = lp.getY();
-			if (hasObjectLightNear(x, z))
-			{
-				return;
-			}
-			int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
-			interior = new InteriorLight(new Light(LightType.INTERIOR, x, y, z));
-			interiorLights.put(cell, interior);
-		}
-		interior.npcs++;
-		npcCells.put(npc.getIndex(), cell);
-	}
-
-	public void npcDespawned(NPC npc)
-	{
-		Integer cell = npcCells.remove(npc.getIndex());
-		if (cell == null)
-		{
-			return;
-		}
-		InteriorLight interior = interiorLights.get(cell);
-		if (interior != null && --interior.npcs <= 0)
-		{
-			interiorLights.remove(cell);
-		}
-	}
-
-	private boolean hasObjectLightNear(int x, int z)
-	{
-		for (Light light : objectLights.values())
-		{
-			float dx = light.x - x;
-			float dz = light.z - z;
-			if (dx * dx + dz * dz < (float) INTERIOR_SKIP_DISTANCE * INTERIOR_SKIP_DISTANCE)
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	public void objectSpawned(TileObject object)
@@ -262,6 +236,15 @@ public class LightManager
 		objectLights.remove(object.getHash());
 	}
 
+	/** Doors opening and closing change which buildings connect, so they trigger a rebuild. */
+	public void wallObjectChanged(WallObject wall)
+	{
+		if (edgeKind(wall.getId()) == EDGE_DOOR)
+		{
+			buildingsDirty = true;
+		}
+	}
+
 	/**
 	 * Picks the lights nearest the player for this frame and fills {@link #positions} and {@link #colors}.
 	 *
@@ -274,6 +257,13 @@ public class LightManager
 			rescan = false;
 			clear();
 			scanScene();
+		}
+
+		WorldView wv = client.getTopLevelWorldView();
+		if (wv != null && (buildingsDirty || wv.getPlane() != buildingPlane))
+		{
+			buildingsDirty = false;
+			rebuildBuildings(wv);
 		}
 
 		count = 0;
@@ -291,9 +281,9 @@ public class LightManager
 		{
 			addCandidate(light, px, pz);
 		}
-		for (InteriorLight interior : interiorLights.values())
+		for (Light light : buildingLights)
 		{
-			addCandidate(interior.light, px, pz);
+			addCandidate(light, px, pz);
 		}
 		for (Projectile projectile : client.getProjectiles())
 		{
@@ -324,6 +314,7 @@ public class LightManager
 			colors[o + 1] = type.g * level;
 			colors[o + 2] = type.b * level;
 			colors[o + 3] = 0f;
+			lightBuildings[i] = light.building;
 		}
 		count = n;
 	}
@@ -346,7 +337,6 @@ public class LightManager
 		{
 			return;
 		}
-		// objects first, so NPC interiors can see the light sources already there
 		Scene scene = wv.getScene();
 		for (Tile[][] plane : scene.getTiles())
 		{
@@ -380,10 +370,260 @@ public class LightManager
 				}
 			}
 		}
+	}
+
+	private void rebuildBuildings(WorldView wv)
+	{
+		buildings = null;
+		buildingLights.clear();
+		buildingPlane = wv.getPlane();
+		maskChanged = true;
+		maskWidth = 1;
+		maskHeight = 1;
+		buildingMask = new short[2];
+
+		CollisionData[] maps = wv.getCollisionMaps();
+		int plane = buildingPlane;
+		if (!interiorEnabled || maps == null || maps[plane] == null)
+		{
+			return;
+		}
+
+		int[][] flags = maps[plane].getFlags();
+		int w = Math.min(flags.length, wv.getSizeX());
+		int h = Math.min(flags[0].length, wv.getSizeY());
+		int[][] f = new int[w][h];
+		boolean[][] underRoof = new boolean[w][h];
+		boolean[][] doorNorth = new boolean[w][h];
+		boolean[][] doorEast = new boolean[w][h];
+		boolean[][] windowNorth = new boolean[w][h];
+		boolean[][] windowEast = new boolean[w][h];
+		byte[][][] settings = wv.getTileSettings();
+		Tile[][][] tiles = wv.getScene().getTiles();
+		for (int x = 0; x < w; x++)
+		{
+			for (int y = 0; y < h; y++)
+			{
+				f[x][y] = flags[x][y];
+				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0;
+				Tile tile = tiles[plane][x][y];
+				if (tile == null)
+				{
+					continue;
+				}
+				WallObject wall = tile.getWallObject();
+				if (wall != null)
+				{
+					int kind = edgeKind(wall.getId());
+					if (kind != EDGE_NONE)
+					{
+						markEdges(kind == EDGE_DOOR ? doorNorth : windowNorth, kind == EDGE_DOOR ? doorEast : windowEast,
+							x, y, wall.getOrientationA() | wall.getOrientationB());
+					}
+				}
+				DecorativeObject decoration = tile.getDecorativeObject();
+				if (decoration != null && edgeKind(decoration.getId()) == EDGE_WINDOW && wall != null)
+				{
+					markEdges(windowNorth, windowEast, x, y, wall.getOrientationA() | wall.getOrientationB());
+				}
+			}
+		}
+
+		buildings = new BuildingMap(f, underRoof, doorNorth, doorEast, windowNorth, windowEast);
+		buildingBaseX = wv.getBaseX();
+		buildingBaseY = wv.getBaseY();
+		for (int b = 0; b < buildings.buildingCount(); b++)
+		{
+			if (rememberedLit.contains(buildingKey(b)))
+			{
+				buildings.lit.set(b, true);
+			}
+		}
 		for (NPC npc : wv.npcs())
 		{
-			npcSpawned(npc);
+			if (npc.getWorldLocation().getPlane() == plane)
+			{
+				LocalPoint lp = npc.getLocalLocation();
+				buildings.npcAt(lp.getSceneX(), lp.getSceneY());
+			}
 		}
+		rememberLit();
+		placeBuildingLights(wv);
+
+		maskWidth = w;
+		maskHeight = h;
+		buildingMask = new short[w * h * 2];
+		for (int y = 0; y < h; y++)
+		{
+			for (int x = 0; x < w; x++)
+			{
+				int i = (y * w + x) * 2;
+				buildingMask[i] = (short) buildings.building[x][y];
+				buildingMask[i + 1] = (short) buildings.spill[x][y];
+			}
+		}
+	}
+
+	private static void markEdges(boolean[][] north, boolean[][] east, int x, int y, int orientation)
+	{
+		if ((orientation & 2) != 0)
+		{
+			north[x][y] = true;
+		}
+		if ((orientation & 8) != 0 && y > 0)
+		{
+			north[x][y - 1] = true;
+		}
+		if ((orientation & 4) != 0)
+		{
+			east[x][y] = true;
+		}
+		if ((orientation & 1) != 0 && x > 0)
+		{
+			east[x - 1][y] = true;
+		}
+	}
+
+	/** Puts ceiling lights in each lit building, spread over the cells it covers. */
+	private void placeBuildingLights(WorldView wv)
+	{
+		buildingLights.clear();
+		int plane = buildingPlane;
+		Map<Integer, int[]> cells = new HashMap<>();
+		for (int b = 0; b < buildings.buildingCount(); b++)
+		{
+			if (!buildings.lit.get(b))
+			{
+				continue;
+			}
+			cells.clear();
+			int[] tiles = buildings.buildingTiles.get(b);
+			for (int t : tiles)
+			{
+				int tx = t >> 16;
+				int ty = t & 0xFFFF;
+				int[] sum = cells.computeIfAbsent((tx / INTERIOR_CELL_TILES) << 16 | (ty / INTERIOR_CELL_TILES), k -> new int[3]);
+				sum[0] += tx;
+				sum[1] += ty;
+				sum[2]++;
+			}
+			for (int[] sum : cells.values())
+			{
+				if (sum[2] < INTERIOR_CELL_MIN_TILES)
+				{
+					continue;
+				}
+				// the building tile nearest the middle of this part, so the light is never outside the building
+				float cx = (float) sum[0] / sum[2];
+				float cy = (float) sum[1] / sum[2];
+				int best = tiles[0];
+				float bestDistance = Float.MAX_VALUE;
+				for (int t : tiles)
+				{
+					float dx = (t >> 16) - cx;
+					float dy = (t & 0xFFFF) - cy;
+					float d = dx * dx + dy * dy;
+					if (d < bestDistance)
+					{
+						bestDistance = d;
+						best = t;
+					}
+				}
+				int x = (best >> 16) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
+				int z = (best & 0xFFFF) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
+				if (hasObjectLightNear(x, z))
+				{
+					continue;
+				}
+				int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
+				Light light = new Light(LightType.INTERIOR, x, y, z);
+				light.building = b + 1;
+				buildingLights.add(light);
+			}
+		}
+	}
+
+	private boolean hasObjectLightNear(int x, int z)
+	{
+		for (Light light : objectLights.values())
+		{
+			float dx = light.x - x;
+			float dz = light.z - z;
+			if (dx * dx + dz * dz < (float) INTERIOR_SKIP_DISTANCE * INTERIOR_SKIP_DISTANCE)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private int countLit()
+	{
+		int n = 0;
+		for (boolean lit : buildings.lit)
+		{
+			if (lit)
+			{
+				n++;
+			}
+		}
+		return n;
+	}
+
+	private void rememberLit()
+	{
+		for (int b = 0; b < buildings.buildingCount(); b++)
+		{
+			if (buildings.lit.get(b))
+			{
+				rememberedLit.add(buildingKey(b));
+			}
+		}
+	}
+
+	private long buildingKey(int b)
+	{
+		int t = buildings.buildingTiles.get(b)[0];
+		long x = buildingBaseX + (t >> 16);
+		long y = buildingBaseY + (t & 0xFFFF);
+		return (long) buildingPlane << 40 | x << 20 | y;
+	}
+
+	/** Whether an object is a door (or gate) or a window, from its name and actions. */
+	private int edgeKind(int id)
+	{
+		Integer cached = edgeCache.get(id);
+		if (cached != null)
+		{
+			return cached;
+		}
+		int kind = EDGE_NONE;
+		ObjectComposition def = client.getObjectDefinition(id);
+		if (def != null && def.getName() != null)
+		{
+			String name = def.getName().toLowerCase();
+			if (name.contains("window"))
+			{
+				kind = EDGE_WINDOW;
+			}
+			else if (name.contains("door") || name.contains("gate"))
+			{
+				kind = EDGE_DOOR;
+			}
+			else if (def.getActions() != null)
+			{
+				for (String action : def.getActions())
+				{
+					if ("Open".equals(action) || "Close".equals(action))
+					{
+						kind = EDGE_DOOR;
+						break;
+					}
+				}
+			}
+		}
+		edgeCache.put(id, kind);
+		return kind;
 	}
 
 	private LightType classify(int id)

@@ -43,6 +43,9 @@ uniform int useLighting;
 uniform int pointLightCount;
 uniform vec4 pointLightPos[MAX_POINT_LIGHTS];    // xyz position, w radius
 uniform vec4 pointLightColor[MAX_POINT_LIGHTS];  // rgb color times brightness
+uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is confined to, 0 for none
+// per tile of the player's plane: r = building id, g = building whose light spills in through a window or doorway
+uniform usampler2D buildingMap;
 
 layout(std140) uniform uniforms {
   float cameraYaw;
@@ -82,7 +85,22 @@ vec3 applyLighting(vec3 color) {
   float diffuse = max(dot(normal, lightDirection), 0.0);
   vec3 light = ambientColor + lightColor * diffuse;
 
+  // Which building this surface belongs to. Sampling a little way along the normal puts the outside face of a
+  // wall outside the building and the inside face inside it, so walls block building lights.
+  vec3 samplePos = fWorldPos + normal * 24.0;
+  ivec2 tile = ivec2(floor(samplePos.xz / 128.0));
+  ivec2 mapSize = textureSize(buildingMap, 0);
+  uvec2 here = uvec2(0u);
+  if (all(greaterThanEqual(tile, ivec2(0))) && all(lessThan(tile, mapSize))) {
+    here = texelFetch(buildingMap, tile, 0).rg;
+  }
+
   for (int i = 0; i < pointLightCount; i++) {
+    int building = pointLightBuilding[i];
+    bool confined = building != 0;
+    if (confined && uint(building) != here.r && uint(building) != here.g) {
+      continue;
+    }
     vec3 toLight = pointLightPos[i].xyz - fWorldPos;
     float dist = length(toLight);
     float radius = pointLightPos[i].w;
@@ -92,7 +110,10 @@ vec3 applyLighting(vec3 color) {
     float falloff = 1.0 - (dist * dist) / (radius * radius);
     falloff *= falloff;
     // wrap the lighting a little so floors and walls right next to a light still catch some of it
-    float facing = max(dot(normal, toLight / max(dist, 1.0)), 0.0) * 0.75 + 0.25;
+    float facing = max(dot(normal, toLight / max(dist, 1.0)), 0.0);
+    if (!confined) {
+      facing = facing * 0.75 + 0.25;
+    }
     light += pointLightColor[i].rgb * falloff * facing;
   }
 
