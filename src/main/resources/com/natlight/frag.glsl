@@ -48,8 +48,9 @@ uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is conf
 // lights that stay put, one per column: row 0 = xyz position and radius, row 1 = rgb color times brightness and
 // the building it's confined to (as pointLightBuilding)
 uniform sampler2D lightData;
-// per tile, the lights (index + 1, 0 for none) from lightData that reach it, in two RGBA texels
-#define GRID_SLOTS 8
+// per tile, the lights (index + 1, 0 for none) from lightData that reach it, in GRID_TEXELS RGBA texels
+#define GRID_SLOTS 16
+#define GRID_TEXELS 4
 uniform usampler2D lightGrid;
 // ceiling lights (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several of them
 // aren't brighter than rooms with one
@@ -211,12 +212,13 @@ vec3 applyLighting(vec3 color) {
   ivec2 gridTile = sFloorness > 0.5 ? sHereTile : sWallTile;
   ivec2 gridSize = textureSize(lightGrid, 0);
   vec3 interior = vec3(0.0);
-  if (all(greaterThanEqual(gridTile, ivec2(0))) && gridTile.x * 2 + 1 < gridSize.x && gridTile.y < gridSize.y) {
-    uvec4 slots[2];
-    slots[0] = texelFetch(lightGrid, ivec2(gridTile.x * 2, gridTile.y), 0);
-    slots[1] = texelFetch(lightGrid, ivec2(gridTile.x * 2 + 1, gridTile.y), 0);
+  if (all(greaterThanEqual(gridTile, ivec2(0))) && (gridTile.x + 1) * GRID_TEXELS <= gridSize.x && gridTile.y < gridSize.y) {
+    uvec4 slots = uvec4(0u);
     for (int k = 0; k < GRID_SLOTS; k++) {
-      uint index = slots[k >> 2][k & 3];
+      if ((k & 3) == 0) {
+        slots = texelFetch(lightGrid, ivec2(gridTile.x * GRID_TEXELS + (k >> 2), gridTile.y), 0);
+      }
+      uint index = slots[k & 3];
       if (index == 0u) {
         break;
       }
@@ -275,9 +277,9 @@ vec3 buildingDebug(vec3 color) {
     amount = 0.25 * float(v.g >> 14);
   }
   ivec2 gridSize = textureSize(lightGrid, 0);
-  if (tile.x * 2 + 1 < gridSize.x && tile.y < gridSize.y) {
+  if ((tile.x + 1) * GRID_TEXELS <= gridSize.x && tile.y < gridSize.y) {
     for (int k = 0; k < GRID_SLOTS; k++) {
-      uint index = texelFetch(lightGrid, ivec2(tile.x * 2 + (k >> 2), tile.y), 0)[k & 3];
+      uint index = texelFetch(lightGrid, ivec2(tile.x * GRID_TEXELS + (k >> 2), tile.y), 0)[k & 3];
       if (index == 0u) {
         break;
       }

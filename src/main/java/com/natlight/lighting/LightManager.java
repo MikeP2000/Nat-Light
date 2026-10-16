@@ -63,8 +63,8 @@ public class LightManager
 	public static final int MAX_DYNAMIC_LIGHTS = 8;
 	/** Lights that stay put (objects, buildings), which pixels only check when the light reaches their tile. */
 	public static final int MAX_STATIC_LIGHTS = 1023;
-	/** Lights each tile can list, in two RGBA texels of the light grid. */
-	public static final int GRID_SLOTS = 8;
+	/** Lights each tile can list, in four RGBA texels of the light grid. */
+	public static final int GRID_SLOTS = 16;
 	// Buildings get one ceiling light per cell of this many tiles that the building covers enough of
 	private static final int INTERIOR_CELL_TILES = 5;
 	private static final int INTERIOR_CELL_MIN_TILES = 3;
@@ -191,7 +191,7 @@ public class LightManager
 	/** The most light the ceiling lights may add up to anywhere, so rooms with several aren't brighter than others. */
 	public float interiorLimit;
 	/**
-	 * Which static lights reach each tile, {@link #GRID_SLOTS} per tile as light index + 1 (0 for none), in two RGBA
+	 * Which static lights reach each tile, {@link #GRID_SLOTS} per tile as light index + 1 (0 for none), in four RGBA
 	 * texels per tile, row-major. Only rebuilt when lights or buildings change.
 	 */
 	public short[] lightGrid = new short[GRID_SLOTS];
@@ -538,7 +538,7 @@ public class LightManager
 					int nx = x + BuildingMap.DX[dir];
 					int ny = y + BuildingMap.DY[dir];
 					if (nx < 0 || ny < 0 || nx >= w || ny >= h || visited[ny * w + nx] == visit
-						|| (buildings != null && !buildings.canSee(x, y, dir)))
+						|| (buildings != null && !buildings.lightPasses(x, y, dir)))
 					{
 						continue;
 					}
@@ -554,7 +554,7 @@ public class LightManager
 			}
 		}
 
-		gridWidth = w * 2;
+		gridWidth = w * GRID_SLOTS / 4;
 		gridHeight = h;
 		lightGrid = new short[w * h * GRID_SLOTS];
 		for (int t = 0; t < w * h; t++)
