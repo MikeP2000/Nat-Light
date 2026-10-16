@@ -47,6 +47,16 @@ public class BuildingMap
 	public static final int SPILL_ID_MASK = 0x3FFF;
 	public static final int SPILL_LEVEL_SHIFT = 14;
 
+	/**
+	 * Corner tiles with an angled wall through them are only half inside. These say which half: the triangle
+	 * towards the named corner.
+	 */
+	public static final int CORNER_NONE = 0;
+	public static final int CORNER_NE = 1;
+	public static final int CORNER_NW = 2;
+	public static final int CORNER_SE = 3;
+	public static final int CORNER_SW = 4;
+
 	private static final int[] DX = {0, 1, 0, -1};
 	private static final int[] DY = {1, 0, -1, 0};
 	private static final int[] MOVE = {
@@ -67,6 +77,8 @@ public class BuildingMap
 	 * (2 next to the opening, 1 a tile further out), or 0 for none. See {@link #SPILL_ID_MASK}.
 	 */
 	public final int[][] spill;
+	/** Which half of each angled-corner tile is inside, see {@link #CORNER_NE}. */
+	public final int[][] corner;
 	/** Tiles of each building, as x << 16 | y, indexed by id - 1. */
 	public final List<int[]> buildingTiles = new ArrayList<>();
 	/** Whether each building, indexed by id - 1, is lit because an NPC is in it or can walk to it. */
@@ -101,8 +113,10 @@ public class BuildingMap
 		this.doorEast = doorEast;
 		this.building = new int[width][height];
 		this.spill = new int[width][height];
+		this.corner = new int[width][height];
 		this.area = new int[width][height];
 
+		findCorners(underRoof);
 		findBuildings(underRoof);
 		findAreas();
 		findSpill();
@@ -245,6 +259,11 @@ public class BuildingMap
 			{
 				int tx = t >> 16;
 				int ty = t & 0xFFFF;
+				if (corner[tx][ty] != CORNER_NONE)
+				{
+					// the open sides of an angled corner are outside the wall, not a way out
+					continue;
+				}
 				for (int d = 0; d < 4; d++)
 				{
 					int nx = tx + DX[d];
@@ -285,6 +304,52 @@ public class BuildingMap
 		}
 	}
 
+	/**
+	 * Finds roofed tiles cut by an angled wall: tiles that can't be stood on and open, with no wall, onto unroofed
+	 * ground on exactly two sides that meet at a corner. The inside is the opposite corner.
+	 */
+	private void findCorners(boolean[][] underRoof)
+	{
+		for (int x = 0; x < width; x++)
+		{
+			for (int y = 0; y < height; y++)
+			{
+				if (!underRoof[x][y] || walkable(x, y))
+				{
+					continue;
+				}
+				int outside = 0;
+				for (int d = 0; d < 4; d++)
+				{
+					int nx = x + DX[d];
+					int ny = y + DY[d];
+					if (inBounds(nx, ny) && !underRoof[nx][ny] && !blocked(x, y, d))
+					{
+						outside |= 1 << d;
+					}
+				}
+				// bits: 1 north, 2 east, 4 south, 8 west
+				switch (outside)
+				{
+					case 4 | 8:
+						corner[x][y] = CORNER_NE;
+						break;
+					case 4 | 2:
+						corner[x][y] = CORNER_NW;
+						break;
+					case 1 | 8:
+						corner[x][y] = CORNER_SE;
+						break;
+					case 1 | 2:
+						corner[x][y] = CORNER_SW;
+						break;
+					default:
+						break;
+				}
+			}
+		}
+	}
+
 	/** Whether too much of an area's outline has no wall, e.g. the ground under a roof's overhang. */
 	private boolean isOpen(List<Integer> tiles, int id, boolean[][] underRoof)
 	{
@@ -303,7 +368,7 @@ public class BuildingMap
 					continue;
 				}
 				outline++;
-				if (inBounds(nx, ny) && !underRoof[nx][ny] && !blocked(tx, ty, d) && !isDoor(tx, ty, d))
+				if (inBounds(nx, ny) && corner[tx][ty] == CORNER_NONE && !underRoof[nx][ny] && !blocked(tx, ty, d) && !isDoor(tx, ty, d))
 				{
 					open++;
 				}

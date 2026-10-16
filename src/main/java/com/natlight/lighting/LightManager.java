@@ -155,8 +155,8 @@ public class LightManager
 	public int count;
 
 	/**
-	 * Building id and spill id of each tile on the player's plane, two shorts per tile in row-major order
-	 * (y rows of x), for the shader to keep building lights inside their walls.
+	 * Building id (with angled-corner half) and spill of each tile on the player's plane, two shorts per tile in
+	 * row-major order (y rows of x), for the shader to keep building lights inside their walls.
 	 */
 	public short[] buildingMask = new short[2];
 	public int maskWidth = 1;
@@ -458,7 +458,8 @@ public class LightManager
 			for (int x = 0; x < w; x++)
 			{
 				int i = (y * w + x) * 2;
-				buildingMask[i] = (short) buildings.building[x][y];
+				// building id in the low 13 bits, which half of an angled-corner tile is inside in the top 3
+				buildingMask[i] = (short) (buildings.building[x][y] | buildings.corner[x][y] << 13);
 				buildingMask[i + 1] = (short) buildings.spill[x][y];
 			}
 		}

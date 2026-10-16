@@ -74,14 +74,25 @@ out vec4 FragColor;
 #include "colorblind.glsl"
 #endif
 
-// How much of a building's light reaches a tile: all of it inside the building, some of it where it spills out
-float buildingShare(ivec2 tile, ivec2 mapSize, uint building) {
+// How much of a building's light reaches a point (in tile units): all of it inside the building, some of it where
+// it spills out. Tiles cut by an angled wall only count the half on the inside.
+float buildingShare(ivec2 tile, vec2 pos, ivec2 mapSize, uint building) {
   if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, mapSize))) {
     return 0.0;
   }
   uvec2 v = texelFetch(buildingMap, tile, 0).rg;
-  if (v.r == building) {
-    return 1.0;
+  if ((v.r & 0x1FFFu) == building) {
+    uint corner = v.r >> 13;
+    if (corner == 0u) {
+      return 1.0;
+    }
+    vec2 f = clamp(pos - vec2(tile), 0.0, 1.0);
+    // positive on the inside half
+    float side = corner == 1u ? f.x + f.y - 1.0  // north-east
+               : corner == 2u ? f.y - f.x        // north-west
+               : corner == 3u ? f.x - f.y        // south-east
+               : 1.0 - f.x - f.y;                // south-west
+    return smoothstep(-0.05, 0.05, side);
   }
   if ((v.g & 0x3FFFu) == building) {
     return float(v.g >> 14) * 0.5;
@@ -105,8 +116,11 @@ vec3 applyLighting(vec3 color) {
   // counts as outside and blocks the light. Floors blend the four nearest tiles, so the light fades across tile
   // edges instead of stopping in hard squares.
   ivec2 mapSize = textureSize(buildingMap, 0);
-  ivec2 wallTile = ivec2(floor((fWorldPos.xz + normal.xz * 24.0) / 128.0));
-  vec2 floorPos = fWorldPos.xz / 128.0 - 0.5;
+  vec2 wallPos = (fWorldPos.xz + normal.xz * 24.0) / 128.0;
+  ivec2 wallTile = ivec2(floor(wallPos));
+  vec2 here = fWorldPos.xz / 128.0;
+  ivec2 hereTile = ivec2(floor(here));
+  vec2 floorPos = here - 0.5;
   ivec2 floorTile = ivec2(floor(floorPos));
   vec2 floorFrac = fract(floorPos);
   float floorness = smoothstep(0.5, 0.9, abs(normal.y));
@@ -117,15 +131,14 @@ vec3 applyLighting(vec3 color) {
     float share = 1.0;
     if (confined) {
       uint b = uint(building);
-      float wallShare = buildingShare(wallTile, mapSize, b);
+      float wallShare = buildingShare(wallTile, wallPos, mapSize, b);
       float floorShare = mix(
-        mix(buildingShare(floorTile, mapSize, b), buildingShare(floorTile + ivec2(1, 0), mapSize, b), floorFrac.x),
-        mix(buildingShare(floorTile + ivec2(0, 1), mapSize, b), buildingShare(floorTile + ivec2(1, 1), mapSize, b), floorFrac.x),
+        mix(buildingShare(floorTile, here, mapSize, b), buildingShare(floorTile + ivec2(1, 0), here, mapSize, b), floorFrac.x),
+        mix(buildingShare(floorTile + ivec2(0, 1), here, mapSize, b), buildingShare(floorTile + ivec2(1, 1), here, mapSize, b), floorFrac.x),
         floorFrac.y);
       // only blend on floors that get some of the light themselves, so it never creeps out past the walls
-      if (buildingShare(ivec2(floor(fWorldPos.xz / 128.0)), mapSize, b) <= 0.0) {
-        floorShare = 0.0;
-      }
+      float own = buildingShare(hereTile, here, mapSize, b);
+      floorShare = own <= 0.0 ? 0.0 : min(floorShare, own);
       share = mix(wallShare, floorShare, floorness);
       if (share <= 0.0) {
         continue;
