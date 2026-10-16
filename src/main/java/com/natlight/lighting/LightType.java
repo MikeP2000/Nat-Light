@@ -47,7 +47,7 @@ public enum LightType
 	BOOTH(1.00f, 0.80f, 0.50f, 4f, 0.6f, 200, 0.02f),
 	EXCHANGE_BOOTH(1.00f, 0.80f, 0.50f, 5f, 0.7f, 220, 0.02f),
 	// a street lamp around the Grand Exchange
-	PLAZA(1.00f, 0.80f, 0.50f, 7f, 0.8f, 300, 0.02f),
+	PLAZA(1.00f, 0.80f, 0.50f, 7f, 0.8f, 240, 0.02f),
 	// a soft ceiling light for buildings that have people in them but no light source of their own
 	INTERIOR(1.00f, 0.80f, 0.55f, 6f, 0.7f, 260, 0.02f);
 

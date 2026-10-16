@@ -129,6 +129,8 @@ float lightShare(uvec2 v, ivec2 tile, vec2 pos, int building) {
   return 0.0;
 }
 
+#define LIGHT_FLOOR_BELOW 270.0
+
 // The surface being lit, shared by the per-light function below
 vec3 sNormal;
 float sFloorness;
@@ -167,6 +169,9 @@ vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
   }
   float falloff = 1.0 - (dist * dist) / (radius * radius);
   falloff *= falloff;
+  // a light only lights its own floor, not the floor below it or the ground outside far beneath it (y is down;
+  // lights hang up to about 260 above their floor, and floors are 240 apart)
+  falloff *= 1.0 - smoothstep(LIGHT_FLOOR_BELOW, LIGHT_FLOOR_BELOW + 70.0, fWorldPos.y - posRadius.y);
   // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
   // back of a wall stays dark.
   float facing = max(dot(sNormal, toLight / max(dist, 1.0)), 0.0);
