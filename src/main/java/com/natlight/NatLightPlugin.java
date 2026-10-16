@@ -297,6 +297,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniPointLightColor;
 	private int uniPointLightBuilding;
 	private int uniBuildingMap;
+	private int uniDebugBuildings;
 	// per-tile building ids that keep building lights inside their walls, bound to texture unit 2
 	private int buildingMapTexture = -1;
 
@@ -695,6 +696,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniPointLightColor = glGetUniformLocation(glProgram, "pointLightColor");
 		uniPointLightBuilding = glGetUniformLocation(glProgram, "pointLightBuilding");
 		uniBuildingMap = glGetUniformLocation(glProgram, "buildingMap");
+		uniDebugBuildings = glGetUniformLocation(glProgram, "debugBuildings");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
 		uniTexTargetDimensions = glGetUniformLocation(glUiProgram, "targetDimensions");
@@ -1160,6 +1162,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		}
 		glActiveTexture(GL_TEXTURE0);
 		glUniform1i(uniBuildingMap, 2);
+		glUniform1i(uniDebugBuildings, config.indoorLights() && config.showBuildingMap() ? 1 : 0);
 	}
 
 	@Subscribe

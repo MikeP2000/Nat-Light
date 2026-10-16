@@ -47,6 +47,7 @@ uniform int pointLightBuilding[MAX_POINT_LIGHTS];  // building the light is conf
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
 // doorway (low 14 bits) and how strongly (top 2 bits, 1-2)
 uniform usampler2D buildingMap;
+uniform int debugBuildings;
 
 layout(std140) uniform uniforms {
   float cameraYaw;
@@ -81,7 +82,7 @@ float buildingShare(ivec2 tile, vec2 pos, ivec2 mapSize, uint building) {
     return 0.0;
   }
   uvec2 v = texelFetch(buildingMap, tile, 0).rg;
-  if ((v.r & 0x1FFFu) == building) {
+  if ((v.r & 0x0FFFu) == building) {
     uint corner = v.r >> 13;
     if (corner == 0u) {
       return 1.0;
@@ -163,6 +164,41 @@ vec3 applyLighting(vec3 color) {
   return color * min(light, vec3(2.0));
 }
 
+// Debug view of the building map: lit buildings green, buildings with no NPC red, light spilling out of windows and
+// doorways blue, and a white dot under each building light.
+vec3 buildingDebug(vec3 color) {
+  ivec2 mapSize = textureSize(buildingMap, 0);
+  vec2 here = fWorldPos.xz / 128.0;
+  ivec2 tile = ivec2(floor(here));
+  if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, mapSize))) {
+    return color;
+  }
+  uvec2 v = texelFetch(buildingMap, tile, 0).rg;
+  uint building = v.r & 0x0FFFu;
+  vec3 tint = vec3(0.0);
+  float amount = 0.0;
+  if (building != 0u) {
+    float inside = buildingShare(tile, here, mapSize, building);
+    tint = (v.r & 0x1000u) != 0u ? vec3(0.1, 1.0, 0.2) : vec3(1.0, 0.15, 0.1);
+    amount = 0.55 * inside;
+    // outline the tiles so you can see where each one starts
+    vec2 f = fract(here);
+    if (min(min(f.x, f.y), min(1.0 - f.x, 1.0 - f.y)) < 0.03) {
+      amount = max(amount, 0.3);
+    }
+  }
+  if (amount < 0.3 && (v.g & 0x3FFFu) != 0u) {
+    tint = vec3(0.2, 0.4, 1.0);
+    amount = 0.25 * float(v.g >> 14);
+  }
+  for (int i = 0; i < pointLightCount; i++) {
+    if (pointLightBuilding[i] != 0 && distance(pointLightPos[i].xz, fWorldPos.xz) < 20.0) {
+      return vec3(1.0);
+    }
+  }
+  return mix(color, tint, amount);
+}
+
 #ifdef ZBUF_DEBUG
 float linear_depth(float depth) {
   // depth is computed as 100/z, solve for z
@@ -200,6 +236,9 @@ void main() {
 
   if (useLighting != 0) {
     c.rgb = applyLighting(c.rgb);
+    if (debugBuildings != 0) {
+      c.rgb = buildingDebug(c.rgb);
+    }
   }
 
 #if COLORBLIND_MODE > 0

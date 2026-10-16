@@ -159,6 +159,9 @@ public class LightManager
 	 * row-major order (y rows of x), for the shader to keep building lights inside their walls.
 	 */
 	public short[] buildingMask = new short[2];
+	/** Building ids above this don't fit in the mask, so those buildings get no light. */
+	private static final int MASK_MAX_BUILDING = 0x0FFF;
+	private static final int MASK_LIT = 0x1000;
 	public int maskWidth = 1;
 	public int maskHeight = 1;
 	public boolean maskChanged = true;
@@ -214,6 +217,7 @@ public class LightManager
 		{
 			rememberLit();
 			placeBuildingLights(npc.getWorldView());
+			writeMask();
 		}
 	}
 
@@ -453,16 +457,34 @@ public class LightManager
 		maskWidth = w;
 		maskHeight = h;
 		buildingMask = new short[w * h * 2];
-		for (int y = 0; y < h; y++)
+		writeMask();
+	}
+
+	private void writeMask()
+	{
+		int w = maskWidth;
+		for (int y = 0; y < maskHeight; y++)
 		{
 			for (int x = 0; x < w; x++)
 			{
 				int i = (y * w + x) * 2;
-				// building id in the low 13 bits, which half of an angled-corner tile is inside in the top 3
-				buildingMask[i] = (short) (buildings.building[x][y] | buildings.corner[x][y] << 13);
-				buildingMask[i + 1] = (short) buildings.spill[x][y];
+				int b = buildings.building[x][y];
+				if (b > MASK_MAX_BUILDING)
+				{
+					b = 0;
+				}
+				else if (b > 0 && buildings.lit.get(b - 1))
+				{
+					b |= MASK_LIT;
+				}
+				// building id in the low 12 bits, whether it is lit in bit 12, which half of an angled-corner tile is
+				// inside in the top 3
+				buildingMask[i] = (short) (b | buildings.corner[x][y] << 13);
+				int spill = buildings.spill[x][y];
+				buildingMask[i + 1] = (short) ((spill & BuildingMap.SPILL_ID_MASK) > MASK_MAX_BUILDING ? 0 : spill);
 			}
 		}
+		maskChanged = true;
 	}
 
 	private static void markEdges(boolean[][] north, boolean[][] east, int x, int y, int orientation)
@@ -493,7 +515,7 @@ public class LightManager
 		Map<Integer, int[]> cells = new HashMap<>();
 		for (int b = 0; b < buildings.buildingCount(); b++)
 		{
-			if (!buildings.lit.get(b))
+			if (!buildings.lit.get(b) || b + 1 > MASK_MAX_BUILDING)
 			{
 				continue;
 			}
