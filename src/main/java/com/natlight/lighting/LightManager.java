@@ -449,7 +449,8 @@ public class LightManager
 			for (int y = 0; y < h; y++)
 			{
 				f[x][y] = flags[x][y];
-				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0;
+				underRoof[x][y] = (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0
+					&& !isOpenFloor(tiles, settings, plane + 1, x, y);
 				Tile tile = tiles[plane][x][y];
 				if (tile == null)
 				{
@@ -525,6 +526,20 @@ public class LightManager
 			}
 		}
 		maskChanged = true;
+	}
+
+	/**
+	 * Whether a tile is an outdoor floor, such as the walkway on top of a town wall. What's under it is covered but
+	 * isn't a building.
+	 */
+	private static boolean isOpenFloor(Tile[][][] tiles, byte[][][] settings, int plane, int x, int y)
+	{
+		if (plane >= tiles.length || (settings[plane][x][y] & Constants.TILE_FLAG_UNDER_ROOF) != 0)
+		{
+			return false;
+		}
+		Tile tile = tiles[plane][x][y];
+		return tile != null && (tile.getSceneTilePaint() != null || tile.getSceneTileModel() != null);
 	}
 
 	private static void markEdges(boolean[][] north, boolean[][] east, int x, int y, int orientation)

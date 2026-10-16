@@ -43,6 +43,10 @@ public class BuildingMap
 	private static final int SPILL_TILES = 2;
 	// A roofed area with more of its outline open than this is an overhang or canopy, not a room
 	private static final float MAX_OPEN_OUTLINE = 0.3f;
+	/** Buildings with a gap in their walls (other than a door) must be at least this big... */
+	private static final int MIN_OPEN_BUILDING_TILES = 9;
+	/** ...and have at most this much of their outline open. */
+	private static final float MAX_OPEN_OUTLINE_SMALL = 0.15f;
 	/** Spill values carry the building id in the low 14 bits and how strong the spill is (1-2) above them. */
 	public static final int SPILL_ID_MASK = 0x3FFF;
 	public static final int SPILL_LEVEL_SHIFT = 14;
@@ -374,7 +378,12 @@ public class BuildingMap
 				}
 			}
 		}
-		return open > outline * MAX_OPEN_OUTLINE;
+		if (open > outline * MAX_OPEN_OUTLINE)
+		{
+			return true;
+		}
+		// a small roofed space with a gap in its side, such as an alcove under a wall walkway, isn't a building either
+		return open > 0 && (tiles.size() < MIN_OPEN_BUILDING_TILES || open > outline * MAX_OPEN_OUTLINE_SMALL);
 	}
 
 	private boolean walkable(int x, int y)
