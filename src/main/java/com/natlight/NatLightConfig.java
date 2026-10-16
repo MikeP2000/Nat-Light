@@ -138,6 +138,59 @@ public interface NatLightConfig extends Config
 		return 40;
 	}
 
+	@ConfigItem(
+		keyName = "lightSources",
+		name = "Light sources",
+		description = "Make torches, fires, lamps and your fire spells light up their surroundings.",
+		position = -3,
+		section = lightingSection
+	)
+	default boolean lightSources()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "indoorLights",
+		name = "Light occupied buildings",
+		description = "Add a soft ceiling light to buildings that an NPC is in or can walk to. The light stays inside the walls and spills out through windows and open doorways.",
+		position = -3,
+		section = lightingSection
+	)
+	default boolean indoorLights()
+	{
+		return true;
+	}
+
+	@Range(
+		max = 200
+	)
+	@ConfigItem(
+		keyName = "lightSourceBrightness",
+		name = "Light source brightness (%)",
+		description = "How bright torches, fires and other light sources are.",
+		position = -2,
+		section = lightingSection
+	)
+	default int lightSourceBrightness()
+	{
+		return 100;
+	}
+
+	@ConfigItem(
+		keyName = "showBuildingMap",
+		name = "Show building map (debug)",
+		description = "Color the ground by how building lights see it: green for lit buildings, red for buildings with no NPC,"
+			+ " blue where light spills out of windows and doorways, grey or orange for roofed areas too small or too open to"
+			+ " count, and a dot under each light (yellow for ceiling lights).",
+		position = -1,
+		section = lightingSection
+	)
+	default boolean showBuildingMap()
+	{
+		return false;
+	}
+
 	@Range(
 		max = MAX_DISTANCE
 	)
