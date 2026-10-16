@@ -1210,11 +1210,11 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		if (width != lightDataWidth)
 		{
 			lightDataWidth = width;
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, 2, 0, GL_RGBA, GL_FLOAT, lightManager.lightData);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, LightManager.LIGHT_DATA_ROWS, 0, GL_RGBA, GL_FLOAT, lightManager.lightData);
 		}
 		else
 		{
-			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, 2, GL_RGBA, GL_FLOAT, lightManager.lightData);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, LightManager.LIGHT_DATA_ROWS, GL_RGBA, GL_FLOAT, lightManager.lightData);
 		}
 		glUniform1i(uniLightData, 3);
 		glUniform1f(uniInteriorLimit, lightManager.interiorLimit);

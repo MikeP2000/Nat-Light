@@ -64,6 +64,7 @@ public class LightManager
 	/** Lights that stay put (objects, buildings), which pixels only check when the light reaches their tile. */
 	public static final int MAX_STATIC_LIGHTS = 1023;
 	/** Lights each tile can list, in four RGBA texels of the light grid. */
+	public static final int LIGHT_DATA_ROWS = 3;
 	public static final int GRID_SLOTS = 16;
 	// Buildings get one ceiling light per cell of this many tiles that the building covers enough of
 	private static final int INTERIOR_CELL_TILES = 5;
@@ -191,10 +192,11 @@ public class LightManager
 	public int count;
 
 	/**
-	 * The lights that stay put, as a texture two rows high: xyz position and radius in the first row, rgb color times
-	 * brightness and building in the second. Refilled every frame for flicker and fading.
+	 * The lights that stay put, as a texture three rows high: xyz position and radius in the first row, rgb color times
+	 * brightness and building in the second, and the height of the floor the light is on in the third. The second row
+	 * is refilled every frame for flicker and fading.
 	 */
-	public float[] lightData = new float[8];
+	public float[] lightData = new float[LIGHT_DATA_ROWS * 4];
 	public int staticCount;
 	/** The most light a room's lights may add up to anywhere, so rooms with several aren't brighter than others. */
 	public float interiorLimit;
@@ -524,7 +526,7 @@ public class LightManager
 		int[] visited = new int[w * h];
 		int visit = 0;
 		ArrayDeque<Integer> queue = new ArrayDeque<>();
-		lightData = new float[Math.max(1, staticCount) * 8];
+		lightData = new float[Math.max(1, staticCount) * LIGHT_DATA_ROWS * 4];
 		for (int i = 0; i < staticCount; i++)
 		{
 			Light light = staticLights.get(i);
@@ -544,6 +546,8 @@ public class LightManager
 			lightData[o + 3] = radius;
 			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0)
 				+ (light.type == LightType.INTERIOR ? CEILING_FLAG : 0);
+			// the floor it stands on, so the shader can keep its light off the floor above
+			lightData[staticCount * 8 + o] = floorHeight(wv, light);
 
 			// spread out from the light's tile to tiles whose middle is within the radius plus a tile's half-diagonal
 			// and a bit, without crossing walls, so light from a campfire in a roofless hut stays inside the hut
@@ -790,6 +794,19 @@ public class LightManager
 			light.x = mx;
 			light.z = mz;
 		}
+	}
+
+	/** Height of the floor under a light, on the light's own plane. */
+	private static float floorHeight(WorldView wv, Light light)
+	{
+		int x = (int) light.x;
+		int z = (int) light.z;
+		if (light.plane < 0 || light.plane >= Constants.MAX_Z || x < 0 || z < 0
+			|| x >= wv.getSizeX() * Perspective.LOCAL_TILE_SIZE || z >= wv.getSizeY() * Perspective.LOCAL_TILE_SIZE)
+		{
+			return light.y + light.type.height;
+		}
+		return wv.getTileHeight(x, z, light.plane);
 	}
 
 	/** The building map of the floor a light is on, or null if there isn't one. */

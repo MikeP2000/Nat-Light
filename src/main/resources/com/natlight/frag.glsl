@@ -130,7 +130,8 @@ float lightShare(uvec2 v, ivec2 tile, vec2 pos, int building) {
 }
 
 #define LIGHT_FLOOR_BELOW 270.0
-#define LIGHT_ROOF_ABOVE 40.0
+// how far above its floor a light reaches before fading out under the ceiling (floors are 240 apart)
+#define LIGHT_CEILING 205.0
 
 // The surface being lit, shared by the per-light function below
 vec3 sNormal;
@@ -149,7 +150,7 @@ uvec2 sFloorV01;
 uvec2 sFloorV11;
 
 // One point light's contribution to the surface
-vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
+vec3 pointLight(vec4 posRadius, vec3 lightColor, int building, float floorY) {
   float share = 1.0;
   if (building != 0) {
     float wallShare = lightShare(sWallV, sWallTile, sWallPos, building);
@@ -170,10 +171,11 @@ vec3 pointLight(vec4 posRadius, vec3 lightColor, int building) {
   }
   float falloff = 1.0 - (dist * dist) / (radius * radius);
   falloff *= falloff;
-  // a light only lights its own floor: not the floor below it or the ground outside far beneath it, and not the
-  // floor above it (y is down; lights hang up to about 200 above their floor, and floors are 240 apart)
+  // a light only lights its own floor: not the floor below it or the ground outside far beneath it, and nothing
+  // past its own ceiling, so a torch high on a wall doesn't light the foot of the walls on the floor above (y is down)
   float below = fWorldPos.y - posRadius.y;
-  falloff *= (1.0 - smoothstep(LIGHT_FLOOR_BELOW, LIGHT_FLOOR_BELOW + 70.0, below)) * (1.0 - smoothstep(LIGHT_ROOF_ABOVE, LIGHT_ROOF_ABOVE + 40.0, -below));
+  float aboveCeiling = (floorY - LIGHT_CEILING) - fWorldPos.y;
+  falloff *= (1.0 - smoothstep(LIGHT_FLOOR_BELOW, LIGHT_FLOOR_BELOW + 70.0, below)) * (1.0 - smoothstep(0.0, 30.0, aboveCeiling));
   // wrap the lighting a little so floors right next to a light still catch some of it. Walls get none, so the
   // back of a wall stays dark.
   float facing = max(dot(sNormal, toLight / max(dist, 1.0)), 0.0);
@@ -231,14 +233,15 @@ vec3 applyLighting(vec3 color) {
       int i = int(index) - 1;
       vec4 posRadius = texelFetch(lightData, ivec2(i, 0), 0);
       vec4 colorBuilding = texelFetch(lightData, ivec2(i, 1), 0);
+      float floorY = texelFetch(lightData, ivec2(i, 2), 0).x;
       int code = int(colorBuilding.a);
       if (code >= CEILING_FLAG) {
         code -= CEILING_FLAG;
       }
       if (code >= INTERIOR_FLAG) {
-        interior += pointLight(posRadius, colorBuilding.rgb, code - INTERIOR_FLAG);
+        interior += pointLight(posRadius, colorBuilding.rgb, code - INTERIOR_FLAG, floorY);
       } else {
-        light += pointLight(posRadius, colorBuilding.rgb, code);
+        light += pointLight(posRadius, colorBuilding.rgb, code, floorY);
       }
     }
   }
@@ -249,9 +252,9 @@ vec3 applyLighting(vec3 color) {
   }
   light += interior;
 
-  // moving lights
+  // moving lights, which light up to a little above themselves
   for (int i = 0; i < pointLightCount; i++) {
-    light += pointLight(pointLightPos[i], pointLightColor[i].rgb, pointLightBuilding[i]);
+    light += pointLight(pointLightPos[i], pointLightColor[i].rgb, pointLightBuilding[i], pointLightPos[i].y + LIGHT_CEILING - 40.0);
   }
 
   // ease off above full brightness instead of clipping, so spots right next to a torch don't blow out
