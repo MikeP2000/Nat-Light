@@ -111,7 +111,7 @@ public class LightManager
 		final float x;
 		final float y;
 		final float z;
-		final float phase;
+		float phase;
 		final int plane;
 		/** Lights placed by this class always stay in their building; others are worked out each frame. */
 		final boolean fixedBuilding;
@@ -122,6 +122,7 @@ public class LightManager
 		float level;
 		/** Identifies the light across area reloads, from its type and world position. */
 		long key;
+		boolean keyed;
 
 		Light(LightType type, float x, float y, float z, int plane, boolean fixedBuilding)
 		{
@@ -131,7 +132,6 @@ public class LightManager
 			this.x = x;
 			this.y = y;
 			this.z = z;
-			// spread the flicker so neighbouring torches don't pulse together
 			this.phase = (float) (((int) x * 31 + (int) z * 17) % 628) / 100f;
 		}
 	}
@@ -198,7 +198,10 @@ public class LightManager
 		previousLevels.clear();
 		for (Light light : objectLights.values())
 		{
-			previousLevels.put(light.key, light.level);
+			if (light.keyed)
+			{
+				previousLevels.put(light.key, light.level);
+			}
 		}
 		for (Light light : buildingLights)
 		{
@@ -271,15 +274,8 @@ public class LightManager
 			x += decoration.getXOffset();
 			z += decoration.getYOffset();
 		}
-		Light light = new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false);
-		WorldView wv = object.getWorldView();
-		keyLight(light, wv.getBaseX(), wv.getBaseY());
-		Float level = previousLevels.get(light.key);
-		if (level != null)
-		{
-			light.level = level;
-		}
-		objectLights.put(object.getHash(), light);
+		// keyed on the first frame it's drawn, once the area has finished loading and its base is settled
+		objectLights.put(object.getHash(), new Light(type, x, object.getZ() - type.height, z, object.getPlane(), false));
 	}
 
 	public void objectDespawned(TileObject object)
@@ -323,6 +319,16 @@ public class LightManager
 		lastCycle = cycle;
 		for (Light light : objectLights.values())
 		{
+			if (!light.keyed && wv != null)
+			{
+				// a light that was already showing before the area reloaded carries on at the same brightness
+				keyLight(light, wv.getBaseX(), wv.getBaseY());
+				Float level = previousLevels.get(light.key);
+				if (level != null)
+				{
+					light.level = level;
+				}
+			}
 			light.level = Math.min(1f, light.level + step);
 		}
 		for (Light light : buildingLights)
@@ -638,7 +644,9 @@ public class LightManager
 			{
 				int tx = t >> 16;
 				int ty = t & 0xFFFF;
-				int[] sum = cells.computeIfAbsent((tx / INTERIOR_CELL_TILES) << 16 | (ty / INTERIOR_CELL_TILES), k -> new int[3]);
+				// cells line up with the world, not the loaded area, so the lights stay put when the area reloads
+				int cell = (buildingBaseX + tx) / INTERIOR_CELL_TILES << 16 | (buildingBaseY + ty) / INTERIOR_CELL_TILES;
+				int[] sum = cells.computeIfAbsent(cell, k -> new int[3]);
 				sum[0] += tx;
 				sum[1] += ty;
 				sum[2]++;
@@ -728,6 +736,10 @@ public class LightManager
 		// quarter-tile world position, plus type and plane
 		long wx = baseX * 4L + (long) Math.floor(light.x / 32f);
 		long wy = baseY * 4L + (long) Math.floor(light.z / 32f);
+		light.keyed = true;
+		// spread the flicker so neighbouring torches don't pulse together, from the world position so it carries on
+		// smoothly when the area reloads
+		light.phase = (float) ((wx * 31 + wy * 17) % 628) / 100f;
 		light.key = (long) light.type.ordinal() << 52 | (long) light.plane << 48 | (wx & 0xFFFFFF) << 24 | (wy & 0xFFFFFF);
 	}
 
