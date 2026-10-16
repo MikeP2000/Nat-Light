@@ -35,6 +35,8 @@ import lombok.AllArgsConstructor;
 public enum LightType
 {
 	TORCH(1.00f, 0.55f, 0.20f, 5f, 1.0f, 110, 0.12f),
+	// a small torch on a wall plaque, like Falador's
+	SCONCE(1.00f, 0.60f, 0.25f, 3f, 0.55f, 110, 0.10f),
 	FIRE(1.00f, 0.50f, 0.15f, 6f, 1.2f, 40, 0.15f),
 	LAMP(1.00f, 0.78f, 0.45f, 5f, 0.7f, 140, 0.03f),
 	CANDLE(1.00f, 0.70f, 0.35f, 3f, 0.45f, 80, 0.08f),
