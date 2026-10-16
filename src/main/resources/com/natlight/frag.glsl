@@ -263,6 +263,9 @@ vec3 applyLighting(vec3 color) {
 // doorways blue, roofed areas too small (grey) or too open (orange) to be a building, and a dot under each light
 // (yellow for ceiling lights, white for the rest).
 vec3 buildingDebug(vec3 color) {
+  // dots only go on floors and table tops, not up the walls next to a light
+  vec3 faceNormal = normalize(cross(dFdx(fWorldPos), dFdy(fWorldPos)));
+  bool onFloor = abs(faceNormal.y) > 0.7;
   ivec2 mapSize = textureSize(buildingMap, 0);
   vec2 here = fWorldPos.xz / 128.0;
   ivec2 tile = ivec2(floor(here));
@@ -299,7 +302,7 @@ vec3 buildingDebug(vec3 color) {
         break;
       }
       vec4 posRadius = texelFetch(lightData, ivec2(int(index) - 1, 0), 0);
-      if (distance(posRadius.xz, fWorldPos.xz) < 20.0 && abs(fWorldPos.y - posRadius.y) < LIGHT_FLOOR_BELOW) {
+      if (onFloor && distance(posRadius.xz, fWorldPos.xz) < 20.0 && abs(fWorldPos.y - posRadius.y) < LIGHT_FLOOR_BELOW) {
         // ceiling lights yellow, everything else white
         return int(texelFetch(lightData, ivec2(int(index) - 1, 1), 0).a) >= CEILING_FLAG ? vec3(1.0, 0.85, 0.0) : vec3(1.0);
       }
