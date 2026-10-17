@@ -138,6 +138,47 @@ public interface NatLightConfig extends Config
 		return 40;
 	}
 
+	@ConfigItem(
+		keyName = "lightSources",
+		name = "Light sources",
+		description = "Make torches, fires, lamps and your fire spells light up their surroundings.",
+		position = -3,
+		section = lightingSection
+	)
+	default boolean lightSources()
+	{
+		return true;
+	}
+
+	@Range(
+		max = 200
+	)
+	@ConfigItem(
+		keyName = "lightSourceBrightness",
+		name = "Light source brightness (%)",
+		description = "How bright torches, fires and other light sources are.",
+		position = -2,
+		section = lightingSection
+	)
+	default int lightSourceBrightness()
+	{
+		return 100;
+	}
+
+	@ConfigItem(
+		keyName = "showBuildingMap",
+		name = "Show building map (debug)",
+		description = "Color the ground by how lights see buildings: green inside buildings, blue where their light spills out"
+			+ " of windows and doorways, grey or orange for roofed areas too small or too open to count, and a dot under each"
+			+ " light.",
+		position = -1,
+		section = lightingSection
+	)
+	default boolean showBuildingMap()
+	{
+		return false;
+	}
+
 	@Range(
 		max = MAX_DISTANCE
 	)

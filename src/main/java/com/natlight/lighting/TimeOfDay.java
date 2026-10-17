@@ -55,6 +55,8 @@ public class TimeOfDay
 	public final float[] lightColor = new float[3];
 	public final float[] ambientColor = new float[3];
 	public final float[] skyColor = new float[3];
+	/** How much of a day it is, from 0 at night to 1 in full daylight. */
+	public float daylight;
 
 	// scratch space, so updating every frame doesn't allocate
 	private final float[] color = new float[3];
@@ -98,6 +100,7 @@ public class TimeOfDay
 		float sunUp = (float) Math.sin(sunAngle);
 
 		float day = smoothstep(-0.2f, 0.2f, sunUp);
+		daylight = day;
 		float warm = smoothstep(-0.25f, 0.0f, sunUp) * (1f - smoothstep(0.1f, 0.6f, sunUp));
 		float sunIntensity = smoothstep(-0.05f, 0.3f, sunUp);
 		float moonIntensity = smoothstep(-0.05f, 0.3f, -sunUp) * MOON_STRENGTH;
@@ -161,6 +164,7 @@ public class TimeOfDay
 		lightDirection[0] = 0f;
 		lightDirection[1] = -1f;
 		lightDirection[2] = 0f;
+		daylight = 0f;
 		for (int i = 0; i < 3; i++)
 		{
 			lightColor[i] = 0f;

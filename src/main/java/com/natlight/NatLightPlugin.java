@@ -61,8 +61,16 @@ import net.runelite.api.WorldEntity;
 import net.runelite.api.WorldView;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.CommandExecuted;
+import net.runelite.api.events.DecorativeObjectDespawned;
+import net.runelite.api.events.DecorativeObjectSpawned;
+import net.runelite.api.events.GameObjectDespawned;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GroundObjectDespawned;
+import net.runelite.api.events.GroundObjectSpawned;
 import net.runelite.api.events.PostClientTick;
+import net.runelite.api.events.WallObjectDespawned;
+import net.runelite.api.events.WallObjectSpawned;
 import net.runelite.api.hooks.DrawCallbacks;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.callback.RenderCallbackManager;
@@ -76,6 +84,7 @@ import net.runelite.client.plugins.PluginManager;
 import com.natlight.config.AntiAliasingMode;
 import com.natlight.config.TimeMode;
 import com.natlight.config.UIScalingMode;
+import com.natlight.lighting.LightManager;
 import com.natlight.lighting.TimeOfDay;
 import com.natlight.template.Template;
 import net.runelite.client.ui.ClientUI;
@@ -110,6 +119,9 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private static final int UNIFORM_BUFFER_SIZE = 5 * Float.BYTES;
 	private static final int NUM_ZONES = Constants.EXTENDED_SCENE_SIZE >> 3;
 	private static final int MAX_WORLDVIEWS = 4096;
+	// settings from earlier versions that are no longer used: the buildings NPCs had lit up, and the switch for the
+	// ceiling lights added to them
+	private static final String[] OLD_CONFIG_KEYS = {"litBuildings", "indoorLights"};
 
 	@Inject
 	private Client client;
@@ -137,6 +149,9 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 
 	@Inject
 	private RenderCallbackManager renderCallbackManager;
+
+	@Inject
+	private ConfigManager configManager;
 
 	private Canvas canvas;
 	private AWTContext awtContext;
@@ -282,11 +297,30 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private int uniLightColor;
 	private int uniAmbientColor;
 	private int uniUseLighting;
+	private int uniPointLightCount;
+	private int uniPointLightPos;
+	private int uniPointLightColor;
+	private int uniPointLightBuilding;
+	private int uniBuildingMap;
+	private int uniLightData;
+	private int uniLightGrid;
+	private int uniInteriorLimit;
+	private int uniDebugBuildings;
+	// per-tile building ids that keep building lights inside their walls, bound to texture unit 2
+	private int buildingMapTexture = -1;
+	private int lightDataTexture = -1;
+	private int lightDataWidth;
+	private int lightGridTexture = -1;
 
 	// Underground areas and dungeons sit above this world y coordinate, and stay unaffected by the time of day
 	private static final int UNDERGROUND_MIN_Y = 4500;
 	private final TimeOfDay timeOfDay = new TimeOfDay();
 	private final float[] baseSky = new float[3];
+	// how much of their full brightness light sources keep in daylight, and underground
+	private static final float DAYLIGHT_LIGHT_SOURCE_SCALE = 0.25f;
+	private static final float UNDERGROUND_LIGHT_SOURCE_SCALE = 0.6f;
+	private LightManager lightManager;
+	private boolean underground;
 
 	static final float[] IDENTITY = Mat4.identity();
 
@@ -294,6 +328,11 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	protected void startUp()
 	{
 		root = new SceneContext(NUM_ZONES, NUM_ZONES);
+		lightManager = new LightManager(client);
+		for (String key : OLD_CONFIG_KEYS)
+		{
+			configManager.unsetConfiguration(NatLightConfig.GROUP, key);
+		}
 		subs = new SceneContext[MAX_WORLDVIEWS];
 		int numThreads = config.numThreads();
 		rts = new RenderThread[numThreads + 1];
@@ -470,6 +509,22 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 				{
 					textureManager.freeTextureArray(textureArrayId);
 					textureArrayId = -1;
+				}
+
+				if (buildingMapTexture != -1)
+				{
+					glDeleteTextures(buildingMapTexture);
+					buildingMapTexture = -1;
+				}
+				if (lightDataTexture != -1)
+				{
+					glDeleteTextures(lightDataTexture);
+					lightDataTexture = -1;
+				}
+				if (lightGridTexture != -1)
+				{
+					glDeleteTextures(lightGridTexture);
+					lightGridTexture = -1;
 				}
 
 				root.free();
@@ -661,6 +716,15 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		uniLightColor = glGetUniformLocation(glProgram, "lightColor");
 		uniAmbientColor = glGetUniformLocation(glProgram, "ambientColor");
 		uniUseLighting = glGetUniformLocation(glProgram, "useLighting");
+		uniPointLightCount = glGetUniformLocation(glProgram, "pointLightCount");
+		uniPointLightPos = glGetUniformLocation(glProgram, "pointLightPos");
+		uniPointLightColor = glGetUniformLocation(glProgram, "pointLightColor");
+		uniPointLightBuilding = glGetUniformLocation(glProgram, "pointLightBuilding");
+		uniBuildingMap = glGetUniformLocation(glProgram, "buildingMap");
+		uniLightData = glGetUniformLocation(glProgram, "lightData");
+		uniLightGrid = glGetUniformLocation(glProgram, "lightGrid");
+		uniInteriorLimit = glGetUniformLocation(glProgram, "interiorLimit");
+		uniDebugBuildings = glGetUniformLocation(glProgram, "debugBuildings");
 
 		uniTex = glGetUniformLocation(glUiProgram, "tex");
 		uniTexTargetDimensions = glGetUniformLocation(glUiProgram, "targetDimensions");
@@ -1005,6 +1069,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		glUniform3f(uniLightDirection, timeOfDay.lightDirection[0], timeOfDay.lightDirection[1], timeOfDay.lightDirection[2]);
 		glUniform3f(uniLightColor, timeOfDay.lightColor[0], timeOfDay.lightColor[1], timeOfDay.lightColor[2]);
 		glUniform3f(uniAmbientColor, timeOfDay.ambientColor[0], timeOfDay.ambientColor[1], timeOfDay.ambientColor[2]);
+		updateLightSources();
 		glUniform1i(uniFogDepth, fogDepth);
 		glUniform1i(uniDrawDistance, drawDistance * Perspective.LOCAL_TILE_SIZE);
 		glUniform1i(uniExpandedMapLoadingChunks, client.getExpandedMapLoading());
@@ -1067,7 +1132,8 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		baseSky[1] = (sky >> 8 & 0xFF) / 255f;
 		baseSky[2] = (sky & 0xFF) / 255f;
 
-		if (isUnderground())
+		underground = isUnderground();
+		if (underground)
 		{
 			timeOfDay.neutral(baseSky);
 		}
@@ -1081,6 +1147,143 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 
 		float[] c = timeOfDay.skyColor;
 		return Math.round(c[0] * 255f) << 16 | Math.round(c[1] * 255f) << 8 | Math.round(c[2] * 255f);
+	}
+
+	private void updateLightSources()
+	{
+		float brightness = 0f;
+		if (config.lightSources())
+		{
+			float scale = underground
+				? UNDERGROUND_LIGHT_SOURCE_SCALE
+				: 1f - (1f - DAYLIGHT_LIGHT_SOURCE_SCALE) * timeOfDay.daylight;
+			brightness = scale * config.lightSourceBrightness() / 100f;
+		}
+		lightManager.update(brightness);
+		glUniform1i(uniPointLightCount, lightManager.count);
+		if (lightManager.count > 0)
+		{
+			glUniform4fv(uniPointLightPos, lightManager.positions);
+			glUniform4fv(uniPointLightColor, lightManager.colors);
+			glUniform1iv(uniPointLightBuilding, lightManager.lightBuildings);
+		}
+
+		if (buildingMapTexture == -1)
+		{
+			buildingMapTexture = createDataTexture(GL_TEXTURE2);
+			lightManager.maskChanged = true;
+		}
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, buildingMapTexture);
+		if (lightManager.maskChanged)
+		{
+			lightManager.maskChanged = false;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16UI, lightManager.maskWidth, lightManager.maskHeight, 0,
+				GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, lightManager.buildingMask);
+		}
+		glUniform1i(uniBuildingMap, 2);
+
+		// the lights that stay put, refreshed every frame for flicker and fading
+		if (lightDataTexture == -1)
+		{
+			lightDataTexture = createDataTexture(GL_TEXTURE3);
+			lightDataWidth = 0;
+		}
+		glActiveTexture(GL_TEXTURE3);
+		glBindTexture(GL_TEXTURE_2D, lightDataTexture);
+		int width = Math.max(1, lightManager.staticCount);
+		if (width != lightDataWidth)
+		{
+			lightDataWidth = width;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, LightManager.LIGHT_DATA_ROWS, 0, GL_RGBA, GL_FLOAT, lightManager.lightData);
+		}
+		else
+		{
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, LightManager.LIGHT_DATA_ROWS, GL_RGBA, GL_FLOAT, lightManager.lightData);
+		}
+		glUniform1i(uniLightData, 3);
+		glUniform1f(uniInteriorLimit, lightManager.interiorLimit);
+
+		// which of those lights reach each tile, only uploaded when it changes
+		if (lightGridTexture == -1)
+		{
+			lightGridTexture = createDataTexture(GL_TEXTURE4);
+			lightManager.gridChanged = true;
+		}
+		glActiveTexture(GL_TEXTURE4);
+		glBindTexture(GL_TEXTURE_2D, lightGridTexture);
+		if (lightManager.gridChanged)
+		{
+			lightManager.gridChanged = false;
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16UI, lightManager.gridWidth, lightManager.gridHeight, 0,
+				GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, lightManager.lightGrid);
+		}
+		glUniform1i(uniLightGrid, 4);
+		glActiveTexture(GL_TEXTURE0);
+		glUniform1i(uniDebugBuildings, config.showBuildingMap() ? 1 : 0);
+	}
+
+	/** A texture of raw values read with texelFetch, so no filtering or wrapping. */
+	private static int createDataTexture(int unit)
+	{
+		int texture = glGenTextures();
+		glActiveTexture(unit);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		return texture;
+	}
+
+	@Subscribe
+	public void onGameObjectSpawned(GameObjectSpawned event)
+	{
+		lightManager.objectSpawned(event.getGameObject());
+	}
+
+	@Subscribe
+	public void onGameObjectDespawned(GameObjectDespawned event)
+	{
+		lightManager.objectDespawned(event.getGameObject());
+	}
+
+	@Subscribe
+	public void onWallObjectSpawned(WallObjectSpawned event)
+	{
+		lightManager.objectSpawned(event.getWallObject());
+		lightManager.wallObjectChanged(event.getWallObject());
+	}
+
+	@Subscribe
+	public void onWallObjectDespawned(WallObjectDespawned event)
+	{
+		lightManager.objectDespawned(event.getWallObject());
+		lightManager.wallObjectChanged(event.getWallObject());
+	}
+
+	@Subscribe
+	public void onDecorativeObjectSpawned(DecorativeObjectSpawned event)
+	{
+		lightManager.objectSpawned(event.getDecorativeObject());
+	}
+
+	@Subscribe
+	public void onDecorativeObjectDespawned(DecorativeObjectDespawned event)
+	{
+		lightManager.objectDespawned(event.getDecorativeObject());
+	}
+
+	@Subscribe
+	public void onGroundObjectSpawned(GroundObjectSpawned event)
+	{
+		lightManager.objectSpawned(event.getGroundObject());
+	}
+
+	@Subscribe
+	public void onGroundObjectDespawned(GroundObjectDespawned event)
+	{
+		lightManager.objectDespawned(event.getGroundObject());
 	}
 
 	private boolean isUnderground()
@@ -1709,6 +1912,16 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
 	{
 		GameState state = gameStateChanged.getGameState();
+		if (state == GameState.LOADING)
+		{
+			// the new scene's objects arrive as spawn events
+			lightManager.clear();
+		}
+		else if (state == GameState.LOGGED_IN)
+		{
+			// the area's collision is ready now, so buildings can be found
+			lightManager.markBuildingsDirty();
+		}
 		if (state.getState() < GameState.LOADING.getState())
 		{
 			// this is to avoid scene fbo blit when going from <loading to >=loading,
