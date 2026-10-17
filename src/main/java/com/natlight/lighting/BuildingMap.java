@@ -32,9 +32,7 @@ import java.util.Set;
 import net.runelite.api.CollisionDataFlag;
 
 /**
- * Splits one plane of the scene into buildings (connected areas under a roof, separated by walls and doors) and
- * works out which buildings an NPC could walk into. For walking, doors count as passable, since NPCs and players
- * can open them.
+ * Splits one plane of the scene into buildings: connected areas under a roof, separated by walls and doors.
  * <p>
  * It also marks where a building's light may spill outside: up to two tiles out through windows and open doorways.
  * A window is a wall named as one, or a wall that blocks movement but not line of sight.
@@ -95,17 +93,12 @@ public class BuildingMap
 	public static final int REJECT_OPEN = 3;
 	/** Tiles of each building, as x << 16 | y, indexed by id - 1. */
 	public final List<int[]> buildingTiles = new ArrayList<>();
-	/** Whether each building, indexed by id - 1, is lit because an NPC is in it or can walk to it. */
-	public final List<Boolean> lit = new ArrayList<>();
 
 	private final int[][] flags;
 	private final boolean[][] doorNorth;
 	private final boolean[][] doorEast;
 	private final boolean[][] windowNorth;
 	private final boolean[][] windowEast;
-	// walkable area each tile belongs to, 0 if it can't be stood on
-	private final int[][] area;
-	private final List<List<Integer>> areaBuildings = new ArrayList<>();
 
 	/**
 	 * @param flags     collision flags of the plane, indexed [x][y]
@@ -129,33 +122,10 @@ public class BuildingMap
 		this.spill = new int[width][height];
 		this.corner = new int[width][height];
 		this.rejected = new int[width][height];
-		this.area = new int[width][height];
 
 		findCorners(underRoof);
 		findBuildings(underRoof);
-		findAreas();
 		findSpill();
-	}
-
-	/** Marks the building an NPC stands in, and every building it can walk to, as lit. */
-	public void npcAt(int x, int y)
-	{
-		if (!inBounds(x, y))
-		{
-			return;
-		}
-		if (building[x][y] != 0)
-		{
-			lit.set(building[x][y] - 1, true);
-		}
-		int a = area[x][y];
-		if (a != 0)
-		{
-			for (int b : areaBuildings.get(a - 1))
-			{
-				lit.set(b - 1, true);
-			}
-		}
 	}
 
 	public int buildingCount()
@@ -280,7 +250,6 @@ public class BuildingMap
 				building[t >> 16][t & 0xFFFF] = next;
 			}
 			buildingTiles.add(groupTiles.stream().mapToInt(Integer::intValue).toArray());
-			lit.add(false);
 			next++;
 		}
 		for (int x = 0; x < width; x++)
@@ -303,48 +272,6 @@ public class BuildingMap
 			r = parent[r];
 		}
 		return r;
-	}
-
-	private void findAreas()
-	{
-		ArrayDeque<Integer> queue = new ArrayDeque<>();
-		int next = 1;
-		for (int x = 0; x < width; x++)
-		{
-			for (int y = 0; y < height; y++)
-			{
-				if (area[x][y] != 0 || !walkable(x, y))
-				{
-					continue;
-				}
-				List<Integer> buildings = new ArrayList<>();
-				area[x][y] = next;
-				queue.add(x << 16 | y);
-				while (!queue.isEmpty())
-				{
-					int t = queue.poll();
-					int tx = t >> 16;
-					int ty = t & 0xFFFF;
-					int b = building[tx][ty];
-					if (b != 0 && !buildings.contains(b))
-					{
-						buildings.add(b);
-					}
-					for (int d = 0; d < 4; d++)
-					{
-						int nx = tx + DX[d];
-						int ny = ty + DY[d];
-						if (inBounds(nx, ny) && area[nx][ny] == 0 && walkable(nx, ny) && canPass(tx, ty, d))
-						{
-							area[nx][ny] = next;
-							queue.add(nx << 16 | ny);
-						}
-					}
-				}
-				areaBuildings.add(buildings);
-				next++;
-			}
-		}
 	}
 
 	private void findSpill()
@@ -524,11 +451,6 @@ public class BuildingMap
 	private boolean walkable(int x, int y)
 	{
 		return (flags[x][y] & CollisionDataFlag.BLOCK_MOVEMENT_FULL) == 0;
-	}
-
-	private boolean canPass(int x, int y, int d)
-	{
-		return !blocked(x, y, d) || isDoor(x, y, d);
 	}
 
 	/** Whether a wall blocks moving from (x, y) in direction d. */

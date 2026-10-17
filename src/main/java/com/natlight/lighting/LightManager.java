@@ -29,7 +29,6 @@ import com.google.common.collect.ImmutableSet;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,7 +38,6 @@ import net.runelite.api.Constants;
 import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.Model;
-import net.runelite.api.NPC;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Perspective;
 import net.runelite.api.Player;
@@ -64,13 +62,9 @@ public class LightManager
 	/** Lights that stay put (objects, buildings), which pixels only check when the light reaches their tile. */
 	public static final int MAX_STATIC_LIGHTS = 1023;
 	/** Lights each tile can list, in four RGBA texels of the light grid. */
-	public static final int LIGHT_DATA_ROWS = 3;
 	public static final int GRID_SLOTS = 16;
-	// Buildings get one ceiling light per cell of this many tiles that the building covers enough of
-	private static final int INTERIOR_CELL_TILES = 5;
-	private static final int INTERIOR_CELL_MIN_TILES = 3;
-	// Skip a ceiling light when a real light source is already this close
-	private static final int INTERIOR_SKIP_DISTANCE = 3 * Perspective.LOCAL_TILE_SIZE;
+	/** Rows of the light data texture: position and radius, color and building, floor height. */
+	public static final int LIGHT_DATA_ROWS = 3;
 
 	// Object names are matched word by word, so "Wall torch" is a torch but "Fire altar" is excluded below
 	private static final Map<String, LightType> NAME_WORDS = ImmutableMap.<String, LightType>builder()
@@ -160,21 +154,14 @@ public class LightManager
 	private boolean lightsDirty = true;
 	private boolean rescan = true;
 
-	// Buildings on the player's plane, and the ones lit because an NPC is in them or can walk to them
+	// Buildings on the player's plane
 	private BuildingMap buildings;
 	// the same for every floor, so lights on other floors stay behind their own floor's walls
 	private BuildingMap[] floors = new BuildingMap[0];
 	private int buildingPlane = -1;
-	private int buildingBaseX;
-	private int buildingBaseY;
 	private boolean buildingsDirty = true;
-	private boolean interiorEnabled = true;
-	private final List<Light> buildingLights = new ArrayList<>();
 	// street lamps around the Grand Exchange, placed around its booths
 	private final List<Light> plazaLights = new ArrayList<>();
-	// lit buildings stay lit when the area reloads, keyed by the world position of their first tile
-	private final Set<Long> rememberedLit = new HashSet<>();
-	private boolean rememberedChanged;
 	// fade levels of the lights from before the area reloaded, so lights that are still there don't fade in again
 	private final Map<Long, Float> previousLevels = new HashMap<>();
 	private int lastCycle = -1;
@@ -218,19 +205,12 @@ public class LightManager
 	public static final int MASK_SHORTS = 4;
 	/** Building ids above this don't fit in the mask, so those buildings get no light. */
 	private static final int MASK_MAX_BUILDING = 0x0FFF;
-	private static final int MASK_LIT = 0x1000;
 	/** Light building value for a light that is outdoors and must not shine into buildings. */
 	private static final int OUTSIDE = -1;
-	/** Added to a ceiling light's building in the light data, so the shader can even out overlapping ones. */
+	/** Added to a room light's building in the light data, so the shader can even out overlapping ones. */
 	private static final int INTERIOR_FLAG = 8192;
 	/** The most the lights of a room add up to, before the overall brightness. */
 	private static final float ROOM_LIGHT_LIMIT = 0.55f;
-	/** Buildings at least this big (castles, halls, churches) are always lit. */
-	private static final int LARGE_BUILDING_TILES = 60;
-	/** A building with at least this many candles counts as lit by them. */
-	private static final int SELF_LIT_CANDLES = 2;
-	/** Added to a ceiling light's building in the light data, so the debug view can tell it apart. */
-	private static final int CEILING_FLAG = 16384;
 	/** How far below the top of a wall light's model its light sits, in local units (up is negative). */
 	private static final int WALL_LIGHT_BELOW_TOP = 12;
 	private static final int PLAZA_MIN_BOOTHS = 4;
@@ -258,10 +238,6 @@ public class LightManager
 				previousLevels.put(light.key, light.level);
 			}
 		}
-		for (Light light : buildingLights)
-		{
-			previousLevels.put(light.key, light.level);
-		}
 		for (Light light : plazaLights)
 		{
 			previousLevels.put(light.key, light.level);
@@ -278,41 +254,12 @@ public class LightManager
 		buildingsDirty = true;
 	}
 
-	/** Turns lighting of occupied buildings on or off. */
-	public void setInteriorEnabled(boolean enabled)
-	{
-		if (enabled != interiorEnabled)
-		{
-			interiorEnabled = enabled;
-			buildingsDirty = true;
-		}
-	}
-
 	/** Forgets everything and scans the loaded scene once more, e.g. when the plugin starts. */
 	public void reset()
 	{
 		clear();
 		typeCache.clear();
 		rescan = true;
-	}
-
-	/** Lights the building an NPC appears in, and every building it could walk to. */
-	public void npcSpawned(NPC npc)
-	{
-		if (buildings == null || npc.getWorldView() == null || !npc.getWorldView().isTopLevel()
-			|| npc.getWorldLocation().getPlane() != buildingPlane)
-		{
-			return;
-		}
-		LocalPoint lp = npc.getLocalLocation();
-		int before = countLit();
-		buildings.npcAt(lp.getSceneX(), lp.getSceneY());
-		if (countLit() != before)
-		{
-			rememberLit();
-			placeBuildingLights(npc.getWorldView());
-			writeMask();
-		}
 	}
 
 	public void objectSpawned(TileObject object)
@@ -428,10 +375,6 @@ public class LightManager
 			}
 			light.level = Math.min(1f, light.level + step);
 		}
-		for (Light light : buildingLights)
-		{
-			light.level = Math.min(1f, light.level + step);
-		}
 		for (Light light : plazaLights)
 		{
 			light.level = Math.min(1f, light.level + step);
@@ -501,7 +444,6 @@ public class LightManager
 	{
 		staticLights.clear();
 		staticLights.addAll(objectLights.values());
-		staticLights.addAll(buildingLights);
 		placePlazaLights();
 		staticLights.addAll(plazaLights);
 		Player player = client.getLocalPlayer();
@@ -544,8 +486,7 @@ public class LightManager
 			lightData[o + 1] = light.y;
 			lightData[o + 2] = light.z;
 			lightData[o + 3] = radius;
-			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0)
-				+ (light.type == LightType.INTERIOR ? CEILING_FLAG : 0);
+			lightData[staticCount * 4 + o + 3] = light.building + (isRoomLight(light) ? INTERIOR_FLAG : 0);
 			// the floor it stands on, so the shader can keep its light off the floor above
 			lightData[staticCount * 8 + o] = floorHeight(wv, light);
 
@@ -671,8 +612,8 @@ public class LightManager
 	}
 
 	/**
-	 * Ceiling lights, lamps and candles inside a building, which together light the room evenly rather than adding
-	 * up. Fires and furnaces still add their own glow on top.
+	 * Lamps, torches and candles inside a building, which together light the room evenly rather than adding up. Fires
+	 * and furnaces still add their own glow on top.
 	 */
 	private static boolean isRoomLight(Light light)
 	{
@@ -682,7 +623,6 @@ public class LightManager
 		}
 		switch (light.type)
 		{
-			case INTERIOR:
 			case LAMP:
 			case CANDLE:
 			case TORCH:
@@ -958,7 +898,6 @@ public class LightManager
 	{
 		buildings = null;
 		floors = new BuildingMap[0];
-		buildingLights.clear();
 		lightsDirty = true;
 		buildingPlane = wv.getPlane();
 		maskChanged = true;
@@ -980,27 +919,6 @@ public class LightManager
 		{
 			return;
 		}
-
-		buildingBaseX = wv.getBaseX();
-		buildingBaseY = wv.getBaseY();
-		for (int b = 0; b < buildings.buildingCount(); b++)
-		{
-			// big buildings like castles, halls and churches are kept lit whether or not an NPC can reach them
-			if (rememberedLit.contains(buildingKey(b)) || buildings.buildingTiles.get(b).length >= LARGE_BUILDING_TILES)
-			{
-				buildings.lit.set(b, true);
-			}
-		}
-		for (NPC npc : wv.npcs())
-		{
-			if (npc.getWorldLocation().getPlane() == plane)
-			{
-				LocalPoint lp = npc.getLocalLocation();
-				buildings.npcAt(lp.getSceneX(), lp.getSceneY());
-			}
-		}
-		rememberLit();
-		placeBuildingLights(wv);
 
 		maskWidth = buildings.width;
 		maskHeight = buildings.height;
@@ -1072,12 +990,7 @@ public class LightManager
 				{
 					b = 0;
 				}
-				else if (b > 0 && buildings.lit.get(b - 1))
-				{
-					b |= MASK_LIT;
-				}
-				// building id in the low 12 bits, whether it is lit in bit 12, which half of an angled-corner tile is
-				// inside in the top 3
+				// building id in the low 12 bits, which half of an angled-corner tile is inside in the top 3
 				buildingMask[i] = (short) (b | buildings.corner[x][y] << 13);
 				int spill = buildings.spill[x][y];
 				buildingMask[i + 1] = (short) ((spill & BuildingMap.SPILL_ID_MASK) > MASK_MAX_BUILDING ? 0 : spill);
@@ -1109,160 +1022,6 @@ public class LightManager
 		}
 	}
 
-	/** Puts ceiling lights in each lit building, spread over the cells it covers. */
-	private void placeBuildingLights(WorldView wv)
-	{
-		// buildings with lamps or torches of their own don't need a ceiling light too, so they don't blow out
-		Set<Integer> selfLit = new HashSet<>();
-		Map<Integer, Integer> candles = new HashMap<>();
-		if (buildings != null)
-		{
-			for (Light light : objectLights.values())
-			{
-				if (light.wallMounted)
-				{
-					pickWallSide(light);
-				}
-				int side = sideOf(light);
-				if (side <= 0)
-				{
-					continue;
-				}
-				if (light.type == LightType.CANDLE)
-				{
-					if (candles.merge(side, 1, Integer::sum) >= SELF_LIT_CANDLES)
-					{
-						selfLit.add(side);
-					}
-				}
-				else
-				{
-					selfLit.add(side);
-				}
-			}
-		}
-		Map<Long, Float> oldLevels = new HashMap<>(previousLevels);
-		for (Light light : buildingLights)
-		{
-			oldLevels.put(light.key, light.level);
-		}
-		buildingLights.clear();
-		lightsDirty = true;
-		if (!interiorEnabled)
-		{
-			return;
-		}
-		int plane = buildingPlane;
-		Map<Integer, int[]> cells = new HashMap<>();
-		for (int b = 0; b < buildings.buildingCount(); b++)
-		{
-			if (!buildings.lit.get(b) || b + 1 > MASK_MAX_BUILDING || selfLit.contains(b + 1))
-			{
-				continue;
-			}
-			cells.clear();
-			int[] tiles = buildings.buildingTiles.get(b);
-			for (int t : tiles)
-			{
-				int tx = t >> 16;
-				int ty = t & 0xFFFF;
-				// cells line up with the world, not the loaded area, so the lights stay put when the area reloads
-				int cell = (buildingBaseX + tx) / INTERIOR_CELL_TILES << 16 | (buildingBaseY + ty) / INTERIOR_CELL_TILES;
-				int[] sum = cells.computeIfAbsent(cell, k -> new int[3]);
-				sum[0] += tx;
-				sum[1] += ty;
-				sum[2]++;
-			}
-			for (int[] sum : cells.values())
-			{
-				if (sum[2] < INTERIOR_CELL_MIN_TILES)
-				{
-					continue;
-				}
-				// the building tile nearest the middle of this part, so the light is never outside the building
-				float cx = (float) sum[0] / sum[2];
-				float cy = (float) sum[1] / sum[2];
-				int best = tiles[0];
-				float bestDistance = Float.MAX_VALUE;
-				for (int t : tiles)
-				{
-					float dx = (t >> 16) - cx;
-					float dy = (t & 0xFFFF) - cy;
-					float d = dx * dx + dy * dy;
-					if (d < bestDistance)
-					{
-						bestDistance = d;
-						best = t;
-					}
-				}
-				int x = (best >> 16) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
-				int z = (best & 0xFFFF) * Perspective.LOCAL_TILE_SIZE + Perspective.LOCAL_TILE_SIZE / 2;
-				if (hasObjectLightNear(x, z, b + 1))
-				{
-					continue;
-				}
-				int y = wv.getTileHeight(x, z, plane) - LightType.INTERIOR.height;
-				Light light = new Light(LightType.INTERIOR, x, y, z, plane, true);
-				light.building = b + 1;
-				keyLight(light, buildingBaseX, buildingBaseY);
-				Float level = oldLevels.get(light.key);
-				if (level != null)
-				{
-					light.level = level;
-				}
-				buildingLights.add(light);
-			}
-		}
-	}
-
-	/** Whether a real light that lights up the same building is already close by. */
-	private boolean hasObjectLightNear(int x, int z, int building)
-	{
-		for (Light light : objectLights.values())
-		{
-			if (light.wallMounted)
-			{
-				pickWallSide(light);
-			}
-			// candles are too dim to light a room, and a torch on the other side of a wall doesn't light this one
-			if (light.type == LightType.CANDLE || sideOf(light) != building)
-			{
-				continue;
-			}
-			float dx = light.x - x;
-			float dz = light.z - z;
-			if (dx * dx + dz * dz < (float) INTERIOR_SKIP_DISTANCE * INTERIOR_SKIP_DISTANCE)
-			{
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private int countLit()
-	{
-		int n = 0;
-		for (boolean lit : buildings.lit)
-		{
-			if (lit)
-			{
-				n++;
-			}
-		}
-		return n;
-	}
-
-	private void rememberLit()
-	{
-		for (int b = 0; b < buildings.buildingCount(); b++)
-		{
-			if (buildings.lit.get(b) && rememberedLit.add(buildingKey(b)))
-			{
-				rememberedChanged = true;
-			}
-		}
-	}
-
 	private static void keyLight(Light light, int baseX, int baseY)
 	{
 		// quarter-tile world position, plus type and plane
@@ -1273,57 +1032,6 @@ public class LightManager
 		// smoothly when the area reloads
 		light.phase = (float) ((wx * 31 + wy * 17) % 628) / 100f;
 		light.key = (long) light.type.ordinal() << 52 | (long) light.plane << 48 | (wx & 0xFFFFFF) << 24 | (wy & 0xFFFFFF);
-	}
-
-	/** Whether the set of remembered lit buildings changed since the last {@link #saveLit()}. */
-	public boolean litChanged()
-	{
-		return rememberedChanged;
-	}
-
-	/** The remembered lit buildings, as a compact string for saving between sessions. */
-	public String saveLit()
-	{
-		rememberedChanged = false;
-		StringBuilder sb = new StringBuilder();
-		for (long key : rememberedLit)
-		{
-			if (sb.length() > 0)
-			{
-				sb.append(',');
-			}
-			sb.append(Long.toString(key, 36));
-		}
-		return sb.toString();
-	}
-
-	/** Restores lit buildings saved by {@link #saveLit()}. */
-	public void loadLit(String saved)
-	{
-		if (saved == null || saved.isEmpty())
-		{
-			return;
-		}
-		for (String part : saved.split(","))
-		{
-			try
-			{
-				rememberedLit.add(Long.parseLong(part, 36));
-			}
-			catch (NumberFormatException e)
-			{
-				// skip anything that isn't a key
-			}
-		}
-		buildingsDirty = true;
-	}
-
-	private long buildingKey(int b)
-	{
-		int t = buildings.buildingTiles.get(b)[0];
-		long x = buildingBaseX + (t >> 16);
-		long y = buildingBaseY + (t & 0xFFFF);
-		return (long) buildingPlane << 40 | x << 20 | y;
 	}
 
 	/** Whether an object is a door (or gate) or a window, from its name and actions. */

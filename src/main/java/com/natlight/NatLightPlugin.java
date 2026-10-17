@@ -68,7 +68,6 @@ import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GroundObjectDespawned;
 import net.runelite.api.events.GroundObjectSpawned;
-import net.runelite.api.events.NpcSpawned;
 import net.runelite.api.events.PostClientTick;
 import net.runelite.api.events.WallObjectDespawned;
 import net.runelite.api.events.WallObjectSpawned;
@@ -120,9 +119,9 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	private static final int UNIFORM_BUFFER_SIZE = 5 * Float.BYTES;
 	private static final int NUM_ZONES = Constants.EXTENDED_SCENE_SIZE >> 3;
 	private static final int MAX_WORLDVIEWS = 4096;
-	// buildings that have been lit are saved, so they're lit straight away next time instead of when an NPC shows up
-	private static final String LIT_BUILDINGS_KEY = "litBuildings";
-	private static final long LIT_SAVE_INTERVAL_MS = 10_000;
+	// settings from earlier versions that are no longer used: the buildings NPCs had lit up, and the switch for the
+	// ceiling lights added to them
+	private static final String[] OLD_CONFIG_KEYS = {"litBuildings", "indoorLights"};
 
 	@Inject
 	private Client client;
@@ -153,8 +152,6 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 
 	@Inject
 	private ConfigManager configManager;
-
-	private long litSavedAt;
 
 	private Canvas canvas;
 	private AWTContext awtContext;
@@ -332,7 +329,10 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	{
 		root = new SceneContext(NUM_ZONES, NUM_ZONES);
 		lightManager = new LightManager(client);
-		lightManager.loadLit(configManager.getConfiguration(NatLightConfig.GROUP, LIT_BUILDINGS_KEY));
+		for (String key : OLD_CONFIG_KEYS)
+		{
+			configManager.unsetConfiguration(NatLightConfig.GROUP, key);
+		}
 		subs = new SceneContext[MAX_WORLDVIEWS];
 		int numThreads = config.numThreads();
 		rts = new RenderThread[numThreads + 1];
@@ -465,15 +465,6 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 		});
 	}
 
-	private void saveLitBuildings()
-	{
-		if (lightManager != null && lightManager.litChanged())
-		{
-			litSavedAt = System.currentTimeMillis();
-			configManager.setConfiguration(NatLightConfig.GROUP, LIT_BUILDINGS_KEY, lightManager.saveLit());
-		}
-	}
-
 	private void setupGpuFlags()
 	{
 		int cpus = Runtime.getRuntime().availableProcessors();
@@ -507,7 +498,6 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	{
 		clientThread.invoke(() ->
 		{
-			saveLitBuildings();
 			client.setGpuFlags(0);
 			client.setDrawCallbacks(null);
 			client.setUnlockedFps(false);
@@ -1169,12 +1159,7 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 				: 1f - (1f - DAYLIGHT_LIGHT_SOURCE_SCALE) * timeOfDay.daylight;
 			brightness = scale * config.lightSourceBrightness() / 100f;
 		}
-		lightManager.setInteriorEnabled(config.lightSources() && config.indoorLights());
 		lightManager.update(brightness);
-		if (lightManager.litChanged() && System.currentTimeMillis() - litSavedAt > LIT_SAVE_INTERVAL_MS)
-		{
-			saveLitBuildings();
-		}
 		glUniform1i(uniPointLightCount, lightManager.count);
 		if (lightManager.count > 0)
 		{
@@ -1299,12 +1284,6 @@ public class NatLightPlugin extends Plugin implements DrawCallbacks
 	public void onGroundObjectDespawned(GroundObjectDespawned event)
 	{
 		lightManager.objectDespawned(event.getGroundObject());
-	}
-
-	@Subscribe
-	public void onNpcSpawned(NpcSpawned event)
-	{
-		lightManager.npcSpawned(event.getNpc());
 	}
 
 	private boolean isUnderground()

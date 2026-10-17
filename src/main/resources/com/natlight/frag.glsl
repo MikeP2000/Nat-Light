@@ -55,8 +55,6 @@ uniform usampler2D lightGrid;
 // the lights of a room (flagged by INTERIOR_FLAG on their building) add up to at most this, so rooms with several
 // lights aren't brighter than rooms with one
 #define INTERIOR_FLAG 8192
-// marks ceiling lights, for the debug view
-#define CEILING_FLAG 16384
 uniform float interiorLimit;
 // per tile of the player's plane: r = building id, g = building whose light spills in through a window or
 // doorway (low 14 bits) and how strongly (top 2 bits, 1-2), b = why a roofed tile isn't a building (debug view)
@@ -235,9 +233,6 @@ vec3 applyLighting(vec3 color) {
       vec4 colorBuilding = texelFetch(lightData, ivec2(i, 1), 0);
       float floorY = texelFetch(lightData, ivec2(i, 2), 0).x;
       int code = int(colorBuilding.a);
-      if (code >= CEILING_FLAG) {
-        code -= CEILING_FLAG;
-      }
       if (code >= INTERIOR_FLAG) {
         interior += pointLight(posRadius, colorBuilding.rgb, code - INTERIOR_FLAG, floorY);
       } else {
@@ -262,9 +257,8 @@ vec3 applyLighting(vec3 color) {
   return color * (min(light, vec3(1.0)) + over / (1.0 + over));
 }
 
-// Debug view of the building map: lit buildings green, buildings with no NPC red, light spilling out of windows and
-// doorways blue, roofed areas too small (grey) or too open (orange) to be a building, and a dot under each light
-// (yellow for ceiling lights, white for the rest).
+// Debug view of the building map: buildings green, light spilling out of windows and doorways blue, roofed areas too
+// small (grey) or too open (orange) to be a building, and a white dot under each light.
 vec3 buildingDebug(vec3 color) {
   // dots only go on floors and table tops, not up the walls next to a light
   vec3 faceNormal = normalize(cross(dFdx(fWorldPos), dFdy(fWorldPos)));
@@ -281,7 +275,7 @@ vec3 buildingDebug(vec3 color) {
   float amount = 0.0;
   if (building != 0u) {
     float inside = cornerShare(v.r, tile, here);
-    tint = (v.r & 0x1000u) != 0u ? vec3(0.1, 1.0, 0.2) : vec3(1.0, 0.15, 0.1);
+    tint = vec3(0.1, 1.0, 0.2);
     amount = 0.55 * inside;
     // outline the tiles so you can see where each one starts
     vec2 f = fract(here);
@@ -306,8 +300,7 @@ vec3 buildingDebug(vec3 color) {
       }
       vec4 posRadius = texelFetch(lightData, ivec2(int(index) - 1, 0), 0);
       if (onFloor && distance(posRadius.xz, fWorldPos.xz) < 20.0 && abs(fWorldPos.y - posRadius.y) < LIGHT_FLOOR_BELOW) {
-        // ceiling lights yellow, everything else white
-        return int(texelFetch(lightData, ivec2(int(index) - 1, 1), 0).a) >= CEILING_FLAG ? vec3(1.0, 0.85, 0.0) : vec3(1.0);
+        return vec3(1.0);
       }
     }
   }
